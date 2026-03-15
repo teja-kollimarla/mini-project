@@ -4,11 +4,12 @@ This project demonstrates how to build a video-based Retrieval Augmented Generat
 
 **Tech stack:** Ragie (video-RAG), YouTube/yt-dlp (single video or full playlist), optional Backblaze B2 (storage), optional OpenRouter/Llama agent, Cursor (MCP host).
 
-### Quick commands (from project root)
+### Quick commands (from `backend/` directory)
 
 | What | Command |
 |------|---------|
 | Install deps | `uv sync` |
+| **Run FastAPI backend (for frontend)** | `uv run uvicorn app:app --reload --host 0.0.0.0` |
 | Run MCP server (for Cursor) | `uv run server.py` |
 | Run Llama agent (chat + tools) | `uv run agent.py` |
 | Ingest `videos/` + one query | `uv run main.py` |
@@ -106,4 +107,78 @@ The MCP server exposes 4 tools:
 - `show_video_tool`: Create a video chunk from a segment (saved to `video_chunks/`, optional B2 upload)
 
 Use Cursor with the MCP server, or run `uv run agent.py` for the standalone Llama agent.
+
+---
+
+## FastAPI backend (for your frontend)
+
+Run the REST API so your frontend can connect:
+
+```bash
+cd backend
+uv run uvicorn app:app --reload --host 0.0.0.0
+```
+
+By default the API is at **http://localhost:8000**. CORS allows all origins.
+
+### User isolation
+
+**All data endpoints require the `X-User-Id` header.** Each user’s videos, index, and clips are isolated:
+
+- Ragie documents are stored in a **partition** per user.
+- Videos are under `videos/{user_id}/`, clips under `video_chunks/{user_id}/`.
+- B2 keys (if used) are scoped as `users/{user_id}/videos/` and `users/{user_id}/chunks/`.
+
+Send the same `X-User-Id` (e.g. your auth user id) on every request. Use only alphanumeric characters, `_`, and `-`.
+
+### API ↔ MCP mapping
+
+| MCP tool | API endpoint |
+|----------|--------------|
+| `ingest_youtube_tool` | `POST /api/ingest/youtube` |
+| `ingest_data_tool` | `POST /api/ingest/directory` |
+| `retrieve_data_tool` | `POST /api/retrieve` |
+| `show_video_tool` | `POST /api/chunk` |
+
+Request/response semantics match the MCP tools; the API adds user scoping via `X-User-Id`.
+
+### API endpoints
+
+| Method | Path | Header | Body | Description |
+|--------|------|--------|------|-------------|
+| GET | `/api/health` | — | — | Health check. Returns `{"status": "ok"}`. |
+| POST | `/api/ingest/youtube` | **X-User-Id** | `{"url": "...", "clear_existing": true}` | Download YouTube video/playlist and index for this user. |
+| POST | `/api/ingest/directory` | **X-User-Id** | `{"directory": "videos"}` | Ingest from this user’s directory. |
+| POST | `/api/retrieve` | **X-User-Id** | `{"query": "..."}` | RAG search over this user’s index. Returns `{ "chunks": [...] }`. |
+| POST | `/api/chunk` | **X-User-Id** | `{"document_name", "start_time", "end_time", "directory"}` | Create a clip for this user. Returns `url` to play the clip. |
+| GET | `/api/chunks` | **X-User-Id** | — | List this user’s chunk filenames. |
+| GET | `/api/chunks/files/{filename}` | **X-User-Id** or `?user_id=` | — | Stream this user’s chunk for playback. |
+
+### Database (users, videos, chats)
+
+A database stores **user details**, **videos** (with Backblaze B2 keys when used), and **chats/messages**. The schema is equivalent to what you’d model in Prisma; this project uses **SQLAlchemy** (Python) with SQLite by default or PostgreSQL via `DATABASE_URL`.
+
+**Tables:**
+
+| Table | Purpose |
+|-------|--------|
+| **users** | `id`, `external_id` (X-User-Id), `email`, `name`, `created_at`, `updated_at` |
+| **videos** | `id`, `user_id`, `filename`, `b2_key`, `source` (youtube \| upload), `source_url`, `created_at` |
+| **chats** | `id`, `user_id`, `title`, `created_at`, `updated_at` |
+| **messages** | `id`, `chat_id`, `role` (user \| assistant), `content`, `created_at` |
+
+**Endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/users/me` | Get or create user by X-User-Id. Returns user id, external_id, email, name. |
+| GET | `/api/videos` | List this user’s videos (filename, b2_key, source, source_url). |
+| POST | `/api/chats` | Create a chat (optional `title`). Returns `id`, `title`, `created_at`. |
+| GET | `/api/chats` | List this user’s chats. |
+| GET | `/api/chats/{chat_id}` | Get chat with all messages. |
+| POST | `/api/chats/{chat_id}/messages` | Add a message: `{"role": "user" \| "assistant", "content": "..."}`. |
+
+On **ingest (YouTube or directory)**, videos are written to the DB with `filename`, `b2_key` (if B2 is configured), and `source`/`source_url`. Your frontend can list them via `GET /api/videos` and use `b2_key` to build B2 URLs if needed.
+
+Interactive docs: **http://localhost:8000/docs** (Swagger UI).
 

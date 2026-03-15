@@ -39,6 +39,7 @@ from db_service import (
     get_video_by_user_and_filename,
     get_session_by_jti,
     record_chunk,
+    record_video,
     record_videos,
     revoke_session,
 )
@@ -217,18 +218,22 @@ def ingest_youtube(
         if body.clear_existing:
             clear_index(user_id=user_id)
         output_dir = f"videos/{user_id}"
-        files = download_youtube(body.url, output_dir=output_dir, user_id=user_id)
-        if not files:
+        # Parallel pipeline: each video is downloaded → uploaded to B2 → we save to DB as it completes
+        results = download_youtube(body.url, output_dir=output_dir, user_id=user_id)
+        if not results:
             return IngestYouTubeResponse(
                 success=False,
-                message="No video files downloaded.",
+                message="No video files downloaded. If YouTube asked to sign in or confirm you're not a bot, set YT_DLP_COOKIES_FILE in backend .env to a cookies.txt path (export from browser).",
                 count=0,
                 documents=[],
             )
-        ingest_data(output_dir, extensions=VIDEO_EXTENSIONS, user_id=user_id)
         user = get_or_create_user(db, user_id)
-        b2_keys = [f"users/{user_id}/videos/{f}" for f in files] if _get_b2_bucket() else None
-        record_videos(db, user.id, files, source="youtube", source_url=body.url, b2_keys=b2_keys)
+        files = []
+        for filename, b2_key in results:
+            record_video(db, user.id, filename, source="youtube", source_url=body.url, b2_key=b2_key)
+            files.append(filename)
+        # Upload to B2 is done inside download_youtube; now ingest all downloaded files to Ragie
+        ingest_data(output_dir, extensions=VIDEO_EXTENSIONS, user_id=user_id)
         return IngestYouTubeResponse(
             success=True,
             message=f"Downloaded and indexed {len(files)} video(s).",
@@ -236,7 +241,18 @@ def ingest_youtube(
             documents=files,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        err_msg = str(e)
+        if "ffmpeg" in err_msg.lower() or "merge" in err_msg.lower():
+            raise HTTPException(
+                status_code=503,
+                detail="FFmpeg is required for YouTube download but is not installed. Install FFmpeg and add it to your PATH: https://ffmpeg.org/download.html (Windows: choco install ffmpeg, or download from https://www.gyan.dev/ffmpeg/builds/)",
+            )
+        if "sign in" in err_msg.lower() or "not a bot" in err_msg.lower() or "cookies" in err_msg.lower():
+            raise HTTPException(
+                status_code=503,
+                detail="YouTube is asking to sign in / confirm you're not a bot. Set YT_DLP_COOKIES_FILE in backend .env to the path of a cookies.txt file (export from your browser when logged into YouTube).",
+            )
+        raise HTTPException(status_code=500, detail=err_msg)
 
 
 @app.post("/api/ingest/directory", response_model=IngestDirectoryResponse)
@@ -374,31 +390,36 @@ def get_chunk_file(
 @app.post("/api/register", response_model=RegisterResponse)
 def register(body: RegisterRequest, db: Session = Depends(get_db)):
     """Create a new user. Password is hashed with bcrypt. Returns JWT access + refresh tokens."""
-    email = body.email.strip().lower()
-    if not email:
-        raise HTTPException(status_code=400, detail="Email is required")
-    existing = get_user_by_email(db, email)
-    if existing:
-        raise HTTPException(status_code=409, detail="An account with this email already exists")
-    external_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", email).strip("_") or f"user_{email[:8]}"
-    password_hash = hash_password(body.password)
-    user = get_or_create_user(db, external_id, email=email, name=(body.name.strip() or None), password_hash=password_hash)
-    jti = str(uuid.uuid4())
-    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
-    create_session(db, user.id, jti, expires_at)
-    access_token = create_access_token(user.external_id)
-    refresh_token = create_refresh_token(user.external_id, jti)
-    return RegisterResponse(
-        id=user.id,
-        external_id=user.external_id,
-        email=user.email,
-        name=user.name,
-        created_at=user.created_at.isoformat(),
-        access_token=access_token,
-        refresh_token=refresh_token,
-        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        token_type="bearer",
-    )
+    try:
+        email = body.email.strip().lower()
+        if not email:
+            raise HTTPException(status_code=400, detail="Email is required")
+        existing = get_user_by_email(db, email)
+        if existing:
+            raise HTTPException(status_code=409, detail="An account with this email already exists")
+        external_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", email).strip("_") or f"user_{email[:8]}"
+        password_hash = hash_password(body.password)
+        user = get_or_create_user(db, external_id, email=email, name=(body.name.strip() or None), password_hash=password_hash)
+        jti = str(uuid.uuid4())
+        expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+        create_session(db, user.id, jti, expires_at)
+        access_token = create_access_token(user.external_id)
+        refresh_token = create_refresh_token(user.external_id, jti)
+        return RegisterResponse(
+            id=user.id,
+            external_id=user.external_id,
+            email=user.email,
+            name=user.name,
+            created_at=user.created_at.isoformat(),
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            token_type="bearer",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
 
 # --- Login (bcrypt verify, JWT + session) ---

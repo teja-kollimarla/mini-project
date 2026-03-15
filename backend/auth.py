@@ -31,14 +31,16 @@ def create_access_token(external_id: str) -> str:
     now = datetime.now(timezone.utc)
     expire = now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {"sub": external_id, "exp": expire, "iat": now, "type": "access"}
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return token if isinstance(token, str) else token.decode("utf-8")
 
 
 def create_refresh_token(external_id: str, jti: str) -> str:
     now = datetime.now(timezone.utc)
     expire = now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     payload = {"sub": external_id, "exp": expire, "iat": now, "type": "refresh", "jti": jti}
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return token if isinstance(token, str) else token.decode("utf-8")
 
 
 def decode_token(token: str) -> dict | None:

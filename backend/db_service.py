@@ -66,6 +66,22 @@ def cleanup_expired_sessions(db: Session) -> int:
     return n
 
 
+def record_video(
+    db: Session,
+    user_id: str,
+    filename: str,
+    source: str,
+    source_url: str | None = None,
+    b2_key: str | None = None,
+) -> Video:
+    """Record a single video (e.g. as soon as it is downloaded and uploaded to B2)."""
+    v = Video(user_id=user_id, filename=filename, source=source, source_url=source_url, b2_key=b2_key)
+    db.add(v)
+    db.commit()
+    db.refresh(v)
+    return v
+
+
 def record_videos(
     db: Session,
     user_id: str,

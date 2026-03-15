@@ -4,6 +4,8 @@ This project demonstrates how to build a video-based Retrieval Augmented Generat
 
 **Tech stack:** Ragie (video-RAG), YouTube/yt-dlp (single video or full playlist), optional Backblaze B2 (storage), optional OpenRouter/Llama agent, Cursor (MCP host).
 
+**YouTube ingest requires [FFmpeg](https://ffmpeg.org/download.html)** (for merging video+audio). Install and add to PATH: Windows: `winget install ffmpeg` or [gyan.dev builds](https://www.gyan.dev/ffmpeg/builds/); macOS: `brew install ffmpeg`; Linux: `apt install ffmpeg` / `dnf install ffmpeg`.
+
 ### Quick commands (from `backend/` directory)
 
 | What | Command |

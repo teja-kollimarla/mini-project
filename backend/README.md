@@ -140,19 +140,19 @@ Send the same `X-User-Id` (e.g. your auth user id) on every request. Use only al
 | `retrieve_data_tool` | `POST /api/retrieve` |
 | `show_video_tool` | `POST /api/chunk` |
 
-Request/response semantics match the MCP tools; the API adds user scoping via `X-User-Id`.
+Request/response semantics match the MCP tools. **Auth:** protected routes accept `Authorization: Bearer <access_token>` (JWT) or `X-User-Id` header.
 
 ### API endpoints
 
-| Method | Path | Header | Body | Description |
-|--------|------|--------|------|-------------|
+| Method | Path | Auth | Body | Description |
+|--------|------|------|------|-------------|
 | GET | `/api/health` | — | — | Health check. Returns `{"status": "ok"}`. |
-| POST | `/api/ingest/youtube` | **X-User-Id** | `{"url": "...", "clear_existing": true}` | Download YouTube video/playlist and index for this user. |
-| POST | `/api/ingest/directory` | **X-User-Id** | `{"directory": "videos"}` | Ingest from this user’s directory. |
-| POST | `/api/retrieve` | **X-User-Id** | `{"query": "..."}` | RAG search over this user’s index. Returns `{ "chunks": [...] }`. |
-| POST | `/api/chunk` | **X-User-Id** | `{"document_name", "start_time", "end_time", "directory"}` | Create a clip for this user. Returns `url` to play the clip. |
-| GET | `/api/chunks` | **X-User-Id** | — | List this user’s chunk filenames. |
-| GET | `/api/chunks/files/{filename}` | **X-User-Id** or `?user_id=` | — | Stream this user’s chunk for playback. |
+| POST | `/api/ingest/youtube` | JWT or X-User-Id | `{"url": "...", "clear_existing": true}` | Download YouTube video/playlist and index for this user. |
+| POST | `/api/ingest/directory` | JWT or X-User-Id | `{"directory": "videos"}` | Ingest from this user’s directory. |
+| POST | `/api/retrieve` | JWT or X-User-Id | `{"query": "..."}` | RAG search over this user’s index. Returns `{ "chunks": [...] }`. |
+| POST | `/api/chunk` | JWT or X-User-Id | `{"document_name", "start_time", "end_time", "directory"}` | Create a clip for this user. Returns `url` to play the clip. |
+| GET | `/api/chunks` | JWT or X-User-Id | — | List this user’s chunks (from DB: id, filename, document_name, start_time, end_time, video_id). |
+| GET | `/api/chunks/files/{filename}` | X-User-Id or `?user_id=` | — | Stream this user’s chunk for playback. |
 
 ### Database (users, videos, chats)
 
@@ -162,8 +162,10 @@ A database stores **user details**, **videos** (with Backblaze B2 keys when used
 
 | Table | Purpose |
 |-------|--------|
-| **users** | `id`, `external_id` (X-User-Id), `email`, `name`, `created_at`, `updated_at` |
+| **users** | `id`, `external_id`, `email`, `name`, `password_hash`, `created_at`, `updated_at` |
+| **sessions** | `id`, `user_id`, `jti`, `expires_at`, `created_at` (refresh token sessions) |
 | **videos** | `id`, `user_id`, `filename`, `b2_key`, `source` (youtube \| upload), `source_url`, `created_at` |
+| **chunks** | `id`, `user_id`, `video_id` (nullable), `document_name`, `start_time`, `end_time`, `filename`, `created_at` |
 | **chats** | `id`, `user_id`, `title`, `created_at`, `updated_at` |
 | **messages** | `id`, `chat_id`, `role` (user \| assistant), `content`, `created_at` |
 
@@ -171,7 +173,7 @@ A database stores **user details**, **videos** (with Backblaze B2 keys when used
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/users/me` | Get or create user by X-User-Id. Returns user id, external_id, email, name. |
+| GET | `/api/users/me` | Get current user (JWT or X-User-Id). Returns user id, external_id, email, name. |
 | GET | `/api/videos` | List this user’s videos (filename, b2_key, source, source_url). |
 | POST | `/api/chats` | Create a chat (optional `title`). Returns `id`, `title`, `created_at`. |
 | GET | `/api/chats` | List this user’s chats. |

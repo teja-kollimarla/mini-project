@@ -1,12 +1,13 @@
 """
 FastAPI backend for video RAG: ingest (YouTube/directory), retrieve, and create clips.
-Videos and index are isolated per user via the X-User-Id header (required on all data endpoints).
-User details, uploaded videos (with B2 keys), and chats are stored in the database.
-API mirrors MCP tools: ingest_youtube_tool, ingest_data_tool, retrieve_data_tool, show_video_tool.
+Auth: JWT (access + refresh) and bcrypt; sessions stored in DB.
+Videos and index are isolated per user via Authorization Bearer token or X-User-Id header.
 Run with: uv run uvicorn app:app --reload --host 0.0.0.0
 """
 import os
 import re
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -15,15 +16,31 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from auth import (
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    create_access_token,
+    create_refresh_token,
+    decode_token,
+    get_external_id_from_access_token,
+    hash_password,
+    verify_password,
+)
 from database import get_db, init_db
 from db_service import (
     add_message,
     create_chat,
+    create_session,
     get_chat_with_messages,
     get_or_create_user,
+    get_user_by_email,
     get_user_chats,
     get_user_videos,
+    get_user_chunks,
+    get_video_by_user_and_filename,
+    get_session_by_jti,
+    record_chunk,
     record_videos,
+    revoke_session,
 )
 from main import (
     VIDEO_EXTENSIONS,
@@ -45,6 +62,22 @@ def _safe_user_id(user_id: str | None) -> str:
         raise HTTPException(status_code=400, detail="X-User-Id must contain at least one alphanumeric character")
     return s
 
+
+def get_current_user_id(
+    authorization: str | None = Header(None),
+    x_user_id: str | None = Header(None, alias="X-User-Id"),
+) -> str:
+    """Resolve user from Authorization Bearer token (JWT) or fallback to X-User-Id header."""
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:].strip()
+        external_id = get_external_id_from_access_token(token)
+        if external_id:
+            return _safe_user_id(external_id)
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    if x_user_id:
+        return _safe_user_id(x_user_id)
+    raise HTTPException(status_code=401, detail="Authorization Bearer token or X-User-Id header required")
+
 app = FastAPI(
     title="Video RAG API",
     description="Ingest YouTube or local videos, query with RAG, create video clips. All data is isolated per user (X-User-Id). Endpoints align with MCP tools.",
@@ -53,7 +86,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[os.getenv("FRONTEND_URL") or "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -101,12 +134,47 @@ class ChunkResponse(BaseModel):
 
 
 # --- Database-backed: users, videos, chats ---
+class RegisterRequest(BaseModel):
+    email: str = Field(..., min_length=1, max_length=255)
+    name: str = Field("", max_length=255)
+    password: str = Field(..., min_length=6, max_length=128)
+
+
+class RegisterResponse(BaseModel):
+    id: str
+    external_id: str
+    email: str | None
+    name: str | None
+    created_at: str
+    access_token: str
+    refresh_token: str
+    expires_in: int  # seconds
+    token_type: str = "bearer"
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str = Field(..., min_length=1)
+
+
 class UserResponse(BaseModel):
     id: str
     external_id: str
     email: str | None
     name: str | None
     created_at: str
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    expires_in: int
+    token_type: str = "bearer"
+    user: UserResponse
 
 
 class VideoResponse(BaseModel):
@@ -141,11 +209,10 @@ def health():
 @app.post("/api/ingest/youtube", response_model=IngestYouTubeResponse)
 def ingest_youtube(
     body: IngestYouTubeRequest,
-    x_user_id: str | None = Header(None, alias="X-User-Id", description="User ID (required for isolation)"),
+    user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
     """MCP: ingest_youtube_tool. Download a YouTube video or playlist and index it in Ragie for this user. Records videos in DB (with B2 keys if configured)."""
-    user_id = _safe_user_id(x_user_id)
     try:
         if body.clear_existing:
             clear_index(user_id=user_id)
@@ -175,11 +242,10 @@ def ingest_youtube(
 @app.post("/api/ingest/directory", response_model=IngestDirectoryResponse)
 def ingest_directory(
     body: IngestDirectoryRequest,
-    x_user_id: str | None = Header(None, alias="X-User-Id"),
+    user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
     """MCP: ingest_data_tool. Ingest videos from this user's directory into the Ragie index. Records videos in DB."""
-    user_id = _safe_user_id(x_user_id)
     try:
         clear_index(user_id=user_id)
         directory = f"videos/{user_id}"
@@ -199,10 +265,9 @@ def ingest_directory(
 @app.post("/api/retrieve", response_model=RetrieveResponse)
 def retrieve(
     body: RetrieveRequest,
-    x_user_id: str | None = Header(None, alias="X-User-Id"),
+    user_id: str = Depends(get_current_user_id),
 ):
     """MCP: retrieve_data_tool. Query the Ragie index for this user; returns chunks with text, document_name, start_time, end_time."""
-    user_id = _safe_user_id(x_user_id)
     try:
         chunks = retrieve_data(body.query, user_id=user_id)
         return RetrieveResponse(success=True, chunks=chunks)
@@ -213,10 +278,10 @@ def retrieve(
 @app.post("/api/chunk", response_model=ChunkResponse)
 def create_chunk(
     body: ChunkRequest,
-    x_user_id: str | None = Header(None, alias="X-User-Id"),
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
 ):
-    """MCP: show_video_tool. Create a video clip from a segment for this user. Returns URL to play the clip."""
-    user_id = _safe_user_id(x_user_id)
+    """MCP: show_video_tool. Create a video clip from a segment for this user. Records chunk in DB linked to video if found."""
     try:
         directory = body.directory if body.directory != "videos" else f"videos/{user_id}"
         result = chunk_video(
@@ -230,6 +295,18 @@ def create_chunk(
         b2_key = result.get("b2_key")
         filename = path.name if path else None
         url = f"/api/chunks/files/{filename}?user_id={user_id}" if filename else None
+        if filename:
+            user = get_or_create_user(db, user_id)
+            video = get_video_by_user_and_filename(db, user.id, body.document_name)
+            record_chunk(
+                db,
+                user.id,
+                body.document_name,
+                body.start_time,
+                body.end_time,
+                filename,
+                video_id=video.id if video else None,
+            )
         return ChunkResponse(
             success=True,
             message="Video chunk created successfully",
@@ -252,14 +329,27 @@ def _chunks_dir_for_user(user_id: str) -> Path:
 
 
 @app.get("/api/chunks")
-def list_chunks(x_user_id: str | None = Header(None, alias="X-User-Id")):
-    """List this user's video chunk filenames."""
-    user_id = _safe_user_id(x_user_id)
-    dir_path = _chunks_dir_for_user(user_id)
-    if not dir_path.exists():
-        return {"chunks": []}
-    files = [f.name for f in dir_path.iterdir() if f.is_file() and f.suffix.lower() == ".mp4"]
-    return {"chunks": sorted(files)}
+def list_chunks(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """List this user's chunks from DB (with video link). Returns list of chunk objects."""
+    user = get_or_create_user(db, user_id)
+    chunks = get_user_chunks(db, user.id)
+    return {
+        "chunks": [
+            {
+                "id": c.id,
+                "filename": c.filename,
+                "document_name": c.document_name,
+                "start_time": c.start_time,
+                "end_time": c.end_time,
+                "video_id": c.video_id,
+                "created_at": c.created_at.isoformat(),
+            }
+            for c in chunks
+        ]
+    }
 
 
 @app.get("/api/chunks/files/{filename}")
@@ -280,14 +370,120 @@ def get_chunk_file(
     return FileResponse(path, media_type="video/mp4")
 
 
-# --- User (get or create by X-User-Id) ---
+# --- Register (create user with bcrypt password, JWT + session in DB) ---
+@app.post("/api/register", response_model=RegisterResponse)
+def register(body: RegisterRequest, db: Session = Depends(get_db)):
+    """Create a new user. Password is hashed with bcrypt. Returns JWT access + refresh tokens."""
+    email = body.email.strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+    existing = get_user_by_email(db, email)
+    if existing:
+        raise HTTPException(status_code=409, detail="An account with this email already exists")
+    external_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", email).strip("_") or f"user_{email[:8]}"
+    password_hash = hash_password(body.password)
+    user = get_or_create_user(db, external_id, email=email, name=(body.name.strip() or None), password_hash=password_hash)
+    jti = str(uuid.uuid4())
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    create_session(db, user.id, jti, expires_at)
+    access_token = create_access_token(user.external_id)
+    refresh_token = create_refresh_token(user.external_id, jti)
+    return RegisterResponse(
+        id=user.id,
+        external_id=user.external_id,
+        email=user.email,
+        name=user.name,
+        created_at=user.created_at.isoformat(),
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        token_type="bearer",
+    )
+
+
+# --- Login (bcrypt verify, JWT + session) ---
+@app.post("/api/login", response_model=LoginResponse)
+def login(body: LoginRequest, db: Session = Depends(get_db)):
+    """Authenticate with email and password. Returns JWT access + refresh tokens."""
+    email = body.email.strip().lower()
+    user = get_user_by_email(db, email)
+    if not user or not user.password_hash:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not verify_password(body.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    jti = str(uuid.uuid4())
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    create_session(db, user.id, jti, expires_at)
+    access_token = create_access_token(user.external_id)
+    refresh_token = create_refresh_token(user.external_id, jti)
+    return LoginResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        token_type="bearer",
+        user=UserResponse(
+            id=user.id,
+            external_id=user.external_id,
+            email=user.email,
+            name=user.name,
+            created_at=user.created_at.isoformat(),
+        ),
+    )
+
+
+# --- Refresh token ---
+@app.post("/api/refresh", response_model=LoginResponse)
+def refresh_tokens(body: RefreshRequest, db: Session = Depends(get_db)):
+    """Issue new access + refresh tokens using a valid refresh token."""
+    payload = decode_token(body.refresh_token)
+    if not payload or payload.get("type") != "refresh":
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+    jti = payload.get("jti")
+    sub = payload.get("sub")
+    if not jti or not sub:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+    session = get_session_by_jti(db, jti)
+    if not session or session.expires_at < datetime.now(timezone.utc):
+        raise HTTPException(status_code=401, detail="Refresh token expired or revoked")
+    user = get_or_create_user(db, sub)
+    new_jti = str(uuid.uuid4())
+    new_expires = datetime.now(timezone.utc) + timedelta(days=7)
+    create_session(db, user.id, new_jti, new_expires)
+    revoke_session(db, jti)
+    access_token = create_access_token(user.external_id)
+    refresh_token = create_refresh_token(user.external_id, new_jti)
+    return LoginResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        token_type="bearer",
+        user=UserResponse(
+            id=user.id,
+            external_id=user.external_id,
+            email=user.email,
+            name=user.name,
+            created_at=user.created_at.isoformat(),
+        ),
+    )
+
+
+# --- Logout (revoke session) ---
+@app.post("/api/logout")
+def logout(body: RefreshRequest, db: Session = Depends(get_db)):
+    """Revoke the refresh token (session)."""
+    payload = decode_token(body.refresh_token)
+    if payload and payload.get("type") == "refresh" and payload.get("jti"):
+        revoke_session(db, payload["jti"])
+    return {"message": "Logged out"}
+
+
+# --- User (JWT or X-User-Id) ---
 @app.get("/api/users/me", response_model=UserResponse)
 def get_current_user(
-    x_user_id: str | None = Header(None, alias="X-User-Id"),
+    user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    """Get or create user by X-User-Id. Use this to resolve the current user and store optional email/name."""
-    user_id = _safe_user_id(x_user_id)
+    """Get or create user. Auth via Bearer token (JWT) or X-User-Id header."""
     user = get_or_create_user(db, user_id)
     return UserResponse(
         id=user.id,
@@ -301,12 +497,11 @@ def get_current_user(
 # --- Videos (list stored videos for user, including B2 keys) ---
 @app.get("/api/videos", response_model=list[VideoResponse])
 def list_videos(
-    x_user_id: str | None = Header(None, alias="X-User-Id"),
+    user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
     limit: int = 200,
 ):
     """List videos uploaded/ingested by this user (from DB; includes B2 keys when set)."""
-    user_id = _safe_user_id(x_user_id)
     user = get_or_create_user(db, user_id)
     videos = get_user_videos(db, user.id, limit=limit)
     return [
@@ -326,11 +521,10 @@ def list_videos(
 @app.post("/api/chats")
 def create_chat_endpoint(
     body: ChatCreate | None = None,
-    x_user_id: str | None = Header(None, alias="X-User-Id"),
+    user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
     """Create a new chat for this user. Returns chat id and title."""
-    user_id = _safe_user_id(x_user_id)
     user = get_or_create_user(db, user_id)
     chat = create_chat(db, user.id, title=(body.title if body else None))
     return {"id": chat.id, "title": chat.title, "created_at": chat.created_at.isoformat()}
@@ -338,12 +532,11 @@ def create_chat_endpoint(
 
 @app.get("/api/chats")
 def list_chats(
-    x_user_id: str | None = Header(None, alias="X-User-Id"),
+    user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
     limit: int = 50,
 ):
     """List this user's chats (newest first)."""
-    user_id = _safe_user_id(x_user_id)
     user = get_or_create_user(db, user_id)
     chats = get_user_chats(db, user.id, limit=limit)
     return [
@@ -355,11 +548,10 @@ def list_chats(
 @app.get("/api/chats/{chat_id}")
 def get_chat(
     chat_id: str,
-    x_user_id: str | None = Header(None, alias="X-User-Id"),
+    user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
     """Get a chat with all its messages."""
-    user_id = _safe_user_id(x_user_id)
     user = get_or_create_user(db, user_id)
     chat = get_chat_with_messages(db, chat_id, user.id)
     if not chat:
@@ -380,11 +572,10 @@ def get_chat(
 def add_message_endpoint(
     chat_id: str,
     body: MessageCreate,
-    x_user_id: str | None = Header(None, alias="X-User-Id"),
+    user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
     """Add a message (user or assistant) to a chat."""
-    user_id = _safe_user_id(x_user_id)
     user = get_or_create_user(db, user_id)
     chat = get_chat_with_messages(db, chat_id, user.id)
     if not chat:

@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, File, Form, FastAPI, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -45,12 +45,14 @@ from db_service import (
 )
 from main import (
     VIDEO_EXTENSIONS,
-    _get_b2_bucket,
+    _cloudinary_configured,
     clear_index,
     ingest_data,
+    ingest_data_from_urls,
     retrieve_data,
     chunk_video,
     download_youtube,
+    upload_directory_to_cloudinary,
 )
 
 
@@ -110,6 +112,14 @@ class IngestDirectoryRequest(BaseModel):
 class IngestDirectoryResponse(BaseModel):
     success: bool
     message: str
+
+
+class IngestUploadResponse(BaseModel):
+    success: bool
+    message: str
+    count: int = 0
+    documents: list[str] = []
+    indexing_status: list[dict] = []  # [{"document": name, "status": "ready"|"processing"|"submitted"|"error"}, ...]
 
 class RetrieveRequest(BaseModel):
     query: str = Field(..., description="Search query")
@@ -271,9 +281,91 @@ def ingest_directory(
         if vid_dir.exists():
             files = [f.name for f in vid_dir.iterdir() if f.is_file() and f.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".m4a"}]
             if files:
-                b2_keys = [f"users/{user_id}/videos/{f}" for f in files] if _get_b2_bucket() else None
+                if _cloudinary_configured():
+                    uploaded = upload_directory_to_cloudinary(vid_dir, f"users/{user_id}/videos")
+                    url_by_name = {name: url for name, url in uploaded}
+                    b2_keys = [url_by_name.get(f) for f in files]
+                else:
+                    b2_keys = None
                 record_videos(db, user.id, files, source="upload", b2_keys=b2_keys)
         return IngestDirectoryResponse(success=True, message="Data loaded successfully")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Allowed video extensions for upload
+UPLOAD_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".m4a"}
+
+
+@app.post("/api/ingest/upload", response_model=IngestUploadResponse)
+async def ingest_upload(
+    files: list[UploadFile] = File(..., alias="files", description="Video files to upload and index"),
+    clear_existing: bool = Form(True, description="Clear Ragie index before ingesting"),
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Upload custom video files, save to user directory, optional Cloudinary, record in DB, and index in Ragie."""
+    file_list = files if isinstance(files, list) else [files]
+    if not file_list:
+        return IngestUploadResponse(success=False, message="No files in request. Use multipart/form-data with key 'files'.", count=0, documents=[])
+    try:
+        if clear_existing:
+            clear_index(user_id=user_id)
+        output_dir = Path(f"videos/{user_id}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        saved_names: list[str] = []
+        for upload in file_list:
+            if not upload.filename:
+                continue
+            ext = Path(upload.filename).suffix.lower()
+            if ext not in UPLOAD_VIDEO_EXTENSIONS:
+                continue
+            base = re.sub(r"[^\w\-.]", "_", Path(upload.filename).stem)[:80]
+            name = f"{base}{ext}"
+            dest = output_dir / name
+            content = await upload.read()
+            dest.write_bytes(content)
+            saved_names.append(name)
+        if not saved_names:
+            allowed = ", ".join(sorted(UPLOAD_VIDEO_EXTENSIONS))
+            return IngestUploadResponse(
+                success=False,
+                message=f"No valid video files. Allowed extensions: {allowed}. Ensure each file has a valid filename.",
+                count=0,
+                documents=[],
+            )
+        url_by_name: dict[str, str | None] = {}
+        if _cloudinary_configured():
+            uploaded_list = upload_directory_to_cloudinary(output_dir, f"users/{user_id}/videos")
+            url_by_name = {n: u for n, u in uploaded_list}
+        user = get_or_create_user(db, user_id)
+        for name in saved_names:
+            record_video(db, user.id, name, source="upload", source_url=None, b2_key=url_by_name.get(name))
+        indexing_status: list[dict] = []
+        url_pairs = [(url_by_name[name], name) for name in saved_names if url_by_name.get(name) and str(url_by_name[name]).startswith("http")]
+        if url_pairs:
+            statuses = ingest_data_from_urls(url_pairs, user_id=user_id)
+            indexing_status = [{"document": name, "status": st} for name, st in statuses]
+        else:
+            statuses = ingest_data(str(output_dir), extensions=VIDEO_EXTENSIONS, user_id=user_id, only_files=saved_names)
+            indexing_status = [{"document": name, "status": st} for name, st in statuses]
+        all_ready = all(s.get("status") == "ready" for s in indexing_status)
+        any_processing = any(s.get("status") == "processing" for s in indexing_status)
+        if all_ready:
+            msg = f"Uploaded {len(saved_names)} video(s). All indexed and ready for search."
+        elif any_processing:
+            msg = f"Uploaded {len(saved_names)} video(s). Some still processing; search may work shortly."
+        else:
+            msg = f"Uploaded {len(saved_names)} video(s). Indexing in progress; search may work in a few minutes."
+        return IngestUploadResponse(
+            success=True,
+            message=msg,
+            count=len(saved_names),
+            documents=saved_names,
+            indexing_status=indexing_status,
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

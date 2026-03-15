@@ -1,6 +1,7 @@
 """
 JWT and bcrypt helpers. Requires JWT_SECRET in env.
 """
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -11,6 +12,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me-in-production")
+# HS256 recommends at least 32 bytes; shorter keys trigger PyJWT InsecureKeyLengthWarning
+if len(JWT_SECRET.encode("utf-8")) < 32:
+    logging.getLogger(__name__).warning(
+        "JWT_SECRET should be at least 32 characters. Set JWT_SECRET to a long random string in .env (e.g. openssl rand -hex 32)."
+    )
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 REFRESH_TOKEN_EXPIRE_DAYS = 7

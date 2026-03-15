@@ -37,6 +37,7 @@ const itemVariants = {
 type VideoRow = {
   id: string
   filename: string
+  /** When set, Cloudinary playback URL; use as video src. */
   b2_key: string | null
   source: string
   source_url: string | null

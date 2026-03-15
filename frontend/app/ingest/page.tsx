@@ -11,7 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Card } from '@/components/ui/card'
 import { DashboardLayout } from '@/components/dashboard-layout'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { ingestYoutube } from '@/lib/api'
+import { ingestYoutube, uploadVideos } from '@/lib/api'
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -42,6 +42,7 @@ export default function IngestPage() {
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([])
   const [uploadState, setUploadState] = useState<IngestionState>('idle')
   const [uploadProgress, setUploadProgress] = useState(0)
+  const [uploadError, setUploadError] = useState<string | null>(null)
 
   const handleYoutubeIngest = async () => {
     if (!youtubeUrl) return
@@ -57,44 +58,48 @@ export default function IngestPage() {
     }
   }
 
+  const ALLOWED_VIDEO_TYPES = ['video/mp4', 'video/quicktime', 'video/x-matroska', 'video/webm', 'video/avi', 'video/x-msvideo', 'video/flv', 'audio/mp4', 'video/*']
+  const isVideo = (file: File) => file.type.startsWith('video/') || ALLOWED_VIDEO_TYPES.includes(file.type) || /\.(mp4|mov|mkv|webm|avi|flv|m4a)$/i.test(file.name)
+
   const handleFileDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
-    const files = Array.from(e.dataTransfer.files).filter(file =>
-      ['video/mp4', 'video/quicktime', 'video/x-matroska'].includes(file.type)
-    )
+    const files = Array.from(e.dataTransfer.files).filter(isVideo)
     setUploadedFiles(prev => [...prev, ...files])
   }
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      const files = Array.from(e.target.files)
+    const input = e.target
+    if (input.files && input.files.length > 0) {
+      const files = Array.from(input.files).filter(isVideo)
       setUploadedFiles(prev => [...prev, ...files])
     }
+    input.value = ''
   }
 
   const handleUpload = async () => {
     if (uploadedFiles.length === 0) return
     setUploadState('loading')
-
-    for (let i = 0; i < uploadedFiles.length; i++) {
-      await new Promise(resolve => {
-        const interval = setInterval(() => {
-          setUploadProgress(prev => {
-            if (prev >= 100) {
-              clearInterval(interval)
-              resolve(null)
-              return 100
-            }
-            return prev + 10
-          })
-        }, 200)
-      })
+    setUploadProgress(10)
+    setUploadError(null)
+    try {
+      await uploadVideos(uploadedFiles, replaceIndex)
+      setUploadProgress(100)
+      setUploadState('success')
+      setUploadedFiles([])
+      setTimeout(() => {
+        setUploadState('idle')
+        setUploadProgress(0)
+      }, 3000)
+    } catch (err) {
+      setUploadState('error')
+      setUploadError(err instanceof Error ? err.message : String(err))
+      setTimeout(() => {
+        setUploadState('idle')
+        setUploadError(null)
+      }, 8000)
+    } finally {
+      setUploadProgress(0)
     }
-
-    setUploadState('success')
-    setUploadedFiles([])
-    setUploadProgress(0)
-    setTimeout(() => setUploadState('idle'), 3000)
   }
 
   const removeFile = (index: number) => {
@@ -226,7 +231,7 @@ export default function IngestPage() {
                       <input
                         type="file"
                         multiple
-                        accept="video/mp4,video/quicktime,video/x-matroska"
+                        accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.flv,.m4a"
                         onChange={handleFileSelect}
                         className="hidden"
                         disabled={uploadState === 'loading'}
@@ -311,7 +316,16 @@ export default function IngestPage() {
                     <Alert className="border-green-500/30 bg-green-500/10">
                       <CheckCircle className="h-4 w-4 text-green-500" />
                       <AlertDescription className="text-green-500">
-                        Successfully uploaded and indexed {uploadedFiles.length} video(s)!
+                        Successfully uploaded and indexed. Check My Videos and Search.
+                      </AlertDescription>
+                    </Alert>
+                  )}
+
+                  {uploadState === 'error' && (
+                    <Alert className="border-red-500/30 bg-red-500/10">
+                      <AlertCircle className="h-4 w-4 text-red-500" />
+                      <AlertDescription className="text-red-500">
+                        {uploadError || 'Upload or indexing failed. Please try again.'}
                       </AlertDescription>
                     </Alert>
                   )}

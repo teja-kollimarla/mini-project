@@ -152,6 +152,23 @@ export async function ingestYoutube(url: string, clearExisting: boolean = true) 
   return handleResponse<{ success: boolean; message: string; count: number; documents: string[] }>(res)
 }
 
+export async function uploadVideos(files: File[], clearExisting: boolean = true) {
+  const form = new FormData()
+  files.forEach((file) => {
+    // Append with filename so server receives it (required for multipart)
+    form.append('files', file, file.name || 'video.mp4')
+  })
+  form.append('clear_existing', String(clearExisting))
+  const headers = { ...authHeaders() } as Record<string, string>
+  delete headers['Content-Type']
+  const res = await fetch(`${API_URL}/api/ingest/upload`, {
+    method: 'POST',
+    headers,
+    body: form,
+  })
+  return handleResponse<{ success: boolean; message: string; count: number; documents: string[] }>(res)
+}
+
 // --- Retrieve (search) ---
 export async function retrieve(query: string) {
   const res = await fetch(`${API_URL}/api/retrieve`, {
@@ -159,7 +176,18 @@ export async function retrieve(query: string) {
     headers: authHeaders(),
     body: JSON.stringify({ query }),
   })
-  return handleResponse<{ success: boolean; chunks: Array<{ text: string; document_name: string; start_time?: number; end_time?: number }> }>(res)
+  return handleResponse<{
+    success: boolean
+    chunks: Array<{
+      text: string
+      document_name: string
+      start_time?: number
+      end_time?: number
+      display_text?: string
+      video_description?: string
+      audio_transcript?: string
+    }>
+  }>(res)
 }
 
 // --- Chunk (create clip) ---

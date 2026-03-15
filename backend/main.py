@@ -7,6 +7,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from dotenv import load_dotenv
+import cloudinary
+import cloudinary.uploader
+import httpx
 from ragie import Ragie
 from moviepy import VideoFileClip
 import yt_dlp
@@ -58,36 +61,80 @@ ragie = Ragie(
 )
 
 
-# Backblaze B2 (optional): set B2_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET_NAME to enable
-def _get_b2_bucket():
+# Cloudinary (optional): set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET to enable
+def _cloudinary_configured() -> bool:
+    """True if Cloudinary env vars are set."""
+    cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME")
+    api_key = os.getenv("CLOUDINARY_API_KEY")
+    api_secret = os.getenv("CLOUDINARY_API_SECRET")
+    return bool(cloud_name and api_key and api_secret)
+
+
+def _cloudinary_sanitize_id(s: str, allow_slash: bool = False) -> str:
+    """Cloudinary public_id: letters, numbers, _, -. Folder can also have /."""
+    if allow_slash:
+        out = re.sub(r"[^a-zA-Z0-9_\-/]", "_", s).strip("/")
+    else:
+        out = re.sub(r"[^a-zA-Z0-9_\-]", "_", s)
+    return out or "video"
+
+
+def _cloudinary_upload(local_path: Path, folder: str, public_id: str | None = None) -> str | None:
+    """Upload a file to Cloudinary as video. Uses the video upload URL explicitly to avoid 'Image file format' errors."""
+    cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME")
+    api_key = os.getenv("CLOUDINARY_API_KEY")
+    api_secret = os.getenv("CLOUDINARY_API_SECRET")
+    if not all((cloud_name, api_key, api_secret)):
+        return None
+    pid = _cloudinary_sanitize_id((public_id or local_path.stem) or "video", allow_slash=False)
+    folder_clean = _cloudinary_sanitize_id(folder, allow_slash=True) or None
     try:
-        from b2sdk.v2 import B2Api, InMemoryAccountInfo
-        key_id = os.getenv("B2_KEY_ID")
-        app_key = os.getenv("B2_APPLICATION_KEY")
-        bucket_name = os.getenv("B2_BUCKET_NAME")
-        if not all((key_id, app_key, bucket_name)):
+        cloudinary.config(
+            cloud_name=cloud_name,
+            api_key=api_key,
+            api_secret=api_secret,
+        )
+        # Build params and sign; use video upload URL explicitly (some SDK paths default to image)
+        from cloudinary import utils as cld_utils
+        params = {"timestamp": cld_utils.now(), "public_id": pid}
+        if folder_clean:
+            params["folder"] = folder_clean
+        options = {"resource_type": "video", "api_key": api_key, "api_secret": api_secret}
+        params = cld_utils.sign_request(params, options)
+        # POST to video upload endpoint explicitly
+        upload_url = f"https://api.cloudinary.com/v1_1/{cloud_name}/video/upload"
+        with open(local_path, "rb") as f:
+            file_bytes = f.read()
+        # Multipart: file + signed params (Cloudinary expects 'file' field for the binary)
+        files = {"file": (local_path.name, file_bytes, "video/mp4")}
+        data = {k: (str(v) if v is not None else "") for k, v in params.items() if v is not None}
+        with httpx.Client(timeout=300.0) as client:
+            r = client.post(upload_url, data=data, files=files)
+        if r.status_code != 200:
+            body = r.text
+            logger.warning("Cloudinary upload failed %s: %s", r.status_code, body[:500] if body else "")
             return None
-        info = InMemoryAccountInfo()
-        b2 = B2Api(info)
-        b2.authorize_account("production", key_id, app_key)
-        return b2.get_bucket_by_name(bucket_name)
+        out = r.json()
+        secure_url = out.get("secure_url")
+        if secure_url:
+            logger.info("Uploaded to Cloudinary: %s", secure_url)
+        return secure_url
     except Exception as e:
-        logger.debug("B2 not configured or error: %s", e)
+        logger.warning("Cloudinary upload failed for %s: %s", local_path.name, e)
         return None
 
 
-def b2_upload(local_path: Path, b2_key: str) -> str | None:
-    """Upload a file to B2. Returns the B2 file key if successful, else None."""
-    bucket = _get_b2_bucket()
-    if bucket is None:
-        return None
-    try:
-        bucket.upload_local_file(str(local_path), b2_key)
-        logger.info("Uploaded to B2: %s", b2_key)
-        return b2_key
-    except Exception as e:
-        logger.warning("B2 upload failed: %s", e)
-        return None
+def upload_directory_to_cloudinary(directory_path: Path, folder: str) -> list[tuple[str, str | None]]:
+    """Upload all video files in directory to Cloudinary. Returns list of (filename, secure_url or None)."""
+    if not _cloudinary_configured():
+        return []
+    results = []
+    for f in directory_path.iterdir():
+        if not f.is_file() or f.suffix.lower() not in VIDEO_EXTENSIONS:
+            continue
+        url = _cloudinary_upload(f, folder, public_id=f.stem)
+        results.append((f.name, url))
+    return results
 
 # Remove previous docs from index (optionally scoped to user_id via partition)
 def clear_index(user_id: str | None = None):
@@ -189,9 +236,8 @@ def _download_one_video(
     for f in output_path.iterdir():
         if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS and f.name not in existing:
             new_files.append(f.name)
-    b2_prefix = f"users/{user_id}/videos/" if user_id else "videos/"
-    bucket = _get_b2_bucket()
-    result = [(name, f"{b2_prefix}{name}" if bucket else None) for name in new_files]
+    cloud_folder = f"users/{user_id}/videos" if user_id else "videos"
+    result = [(name, cloud_folder) for name in new_files]
     return result
 
 
@@ -200,8 +246,8 @@ def download_youtube(
     url: str, output_dir: str = "videos", user_id: str | None = None
 ) -> list[tuple[str, str | None]]:
     """
-    Download videos in parallel; upload all to B2 only after all downloads finish (avoids 0-byte uploads from race).
-    Returns list of (filename, b2_key).
+    Download videos in parallel; upload to Cloudinary after all downloads finish when configured.
+    Returns list of (filename, cloudinary_url or None).
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -223,22 +269,30 @@ def download_youtube(
                     all_results.append(item)
             except Exception as e:
                 logger.warning("Download failed for %s: %s", futures[future], e)
-    # B2 upload only the files that were downloaded in this run (all_results), not the whole directory.
-    if _get_b2_bucket():
+    # Cloudinary upload only the files that were downloaded in this run (all_results).
+    if _cloudinary_configured():
         seen = set()
-        for name, b2_key in all_results:
-            if not b2_key or name in seen:
+        for name, folder in all_results:
+            if not folder or name in seen:
                 continue
             seen.add(name)
             path = output_path / name
             if path.is_file() and path.stat().st_size > 0:
                 try:
-                    logger.info("Uploading to B2: %s", name)
-                    b2_upload(path, b2_key)
+                    logger.info("Uploading to Cloudinary: %s", name)
+                    url = _cloudinary_upload(path, folder, public_id=Path(name).stem)
+                    if url:
+                        # Replace folder in all_results with URL for this file (same index)
+                        idx = next(i for i, (n, _) in enumerate(all_results) if n == name)
+                        all_results[idx] = (name, url)
                 except Exception as e:
-                    logger.warning("B2 upload failed for %s: %s", name, e)
+                    logger.warning("Cloudinary upload failed for %s: %s", name, e)
             else:
-                logger.warning("Skipping B2 upload for %s (missing or 0 bytes)", name)
+                logger.warning("Skipping Cloudinary upload for %s (missing or 0 bytes)", name)
+        # Normalize: when Cloudinary not used or upload failed, store None for storage URL
+        all_results = [(name, url if (url and url.startswith("http")) else None) for name, url in all_results]
+    else:
+        all_results = [(name, None) for name, _ in all_results]
     return all_results
 
 def _ingest_one_file(
@@ -246,8 +300,8 @@ def _ingest_one_file(
     file_name: str,
     partition: str | None,
     metadata: dict,
-) -> None:
-    """Ingest a single file to Ragie (used by parallel workers)."""
+) -> str:
+    """Ingest a single file to Ragie. Returns 'ready' | 'processing' | 'submitted'."""
     with open(file_path, mode="rb") as f:
         file_content = f.read()
     payload = {
@@ -259,28 +313,130 @@ def _ingest_one_file(
     if metadata:
         payload["metadata"] = metadata
     response = ragie.documents.create(request=payload)
-    while True:
-        res = ragie.documents.get(document_id=response.id)
-        if res.status == "ready":
-            break
+    doc_id = response.id
+    last_known_status: str | None = None
+    for attempt in range(15):
         time.sleep(2)
-    logger.info("Successfully ingested %s", file_name)
+        try:
+            res = ragie.documents.get(document_id=doc_id)
+            last_known_status = getattr(res, "status", None) or ""
+            if last_known_status == "ready":
+                logger.info("Successfully ingested %s (ready)", file_name)
+                return "ready"
+            if last_known_status == "failed":
+                raise RuntimeError(f"Ragie document failed: {doc_id}")
+            # pending, partitioning, chunked, indexed, etc. -> still processing
+            logger.debug("Ragie document %s status: %s", file_name, last_known_status)
+        except Exception as e:
+            err_str = str(e).lower()
+            is_404 = "not found" in err_str or "404" in err_str or "document not found" in err_str
+            if is_404 and attempt >= 14:
+                if last_known_status:
+                    logger.info("Ragie document %s still %s (indexing in progress); id=%s", file_name, last_known_status, doc_id)
+                    return "processing"
+                logger.info("Ragie document %s submitted (indexing in background); id=%s", file_name, doc_id)
+                return "submitted"
+            if is_404:
+                continue
+            raise
+    return "processing" if last_known_status else "submitted"
+
+
+def _ingest_one_url(
+    video_url: str,
+    file_name: str,
+    partition: str | None,
+    metadata: dict,
+) -> str:
+    """Ingest a single video into Ragie from a public URL. Returns 'ready' | 'processing' | 'submitted'."""
+    api_key = os.getenv("RAGIE_API_KEY")
+    if not api_key:
+        raise ValueError("RAGIE_API_KEY not set")
+    payload = {
+        "url": video_url,
+        "mode": {"video": "audio_video", "audio": True},
+        "name": file_name,
+    }
+    if partition:
+        payload["partition"] = partition
+    if metadata:
+        payload["metadata"] = metadata
+    with httpx.Client(timeout=60.0) as client:
+        r = client.post(
+            "https://api.ragie.ai/documents/url",
+            json=payload,
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        r.raise_for_status()
+        doc = r.json()
+    doc_id = doc.get("id")
+    if not doc_id:
+        raise RuntimeError("Ragie did not return document id")
+    last_known_status: str | None = None
+    for attempt in range(15):
+        time.sleep(2)
+        try:
+            res = ragie.documents.get(document_id=doc_id)
+            last_known_status = getattr(res, "status", None) or ""
+            if last_known_status == "ready":
+                logger.info("Successfully ingested from URL %s (ready)", file_name)
+                return "ready"
+            if last_known_status == "failed":
+                raise RuntimeError(f"Ragie document failed: {doc_id}")
+            logger.debug("Ragie document from URL %s status: %s", file_name, last_known_status)
+        except Exception as e:
+            err_str = str(e).lower()
+            is_404 = "not found" in err_str or "404" in err_str or "document not found" in err_str
+            if is_404 and attempt >= 14:
+                if last_known_status:
+                    return "processing"
+                logger.info("Ragie document from URL %s submitted (indexing in background)", file_name)
+                return "submitted"
+            if is_404:
+                continue
+            raise
+    return "processing" if last_known_status else "submitted"
+
+
+def ingest_data_from_urls(
+    url_file_pairs: list[tuple[str, str]],
+    user_id: str | None = None,
+) -> list[tuple[str, str]]:
+    """Ingest videos into Ragie from public URLs. Returns list of (file_name, status)."""
+    statuses: list[tuple[str, str]] = []
+    if not url_file_pairs:
+        return statuses
+    partition = _partition_for_user(user_id) if user_id else None
+    metadata = {"user_id": user_id} if user_id else {}
+    for video_url, file_name in url_file_pairs:
+        if not video_url or not video_url.startswith("http"):
+            continue
+        try:
+            st = _ingest_one_url(video_url, file_name, partition, metadata)
+            statuses.append((file_name, st))
+        except Exception as e:
+            logger.error("Failed to ingest from URL %s: %s", file_name, e)
+            statuses.append((file_name, "error"))
+    return statuses
 
 
 # Ingest data from a directory into the Ragie index (optionally scoped to user_id)
-def ingest_data(directory, extensions: set | None = None, user_id: str | None = None):
-    """Ingest video/files from directory. If user_id is set, documents are stored in that partition and tagged with metadata. Runs ingest in parallel for speed."""
+def ingest_data(directory, extensions: set | None = None, user_id: str | None = None, only_files: list[str] | None = None):
+    """Ingest video/files from directory. If only_files is set, ingest just those filenames (avoids re-ingesting whole dir)."""
     directory_path = Path(directory)
     files = os.listdir(directory_path)
     if extensions is not None:
         files = [f for f in files if Path(f).suffix.lower() in extensions]
+    if only_files is not None:
+        only_set = set(only_files)
+        files = [f for f in files if f in only_set]
     if files:
         logger.info("Ingesting %s file(s) to Ragie...", len(files))
 
     partition = _partition_for_user(user_id) if user_id else None
     metadata = {"user_id": user_id} if user_id else {}
 
-    # Ingest to Ragie in parallel (limit workers to avoid memory and rate limits)
+    statuses: list[tuple[str, str]] = []
     max_workers = min(4, max(1, len(files)))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -296,9 +452,12 @@ def ingest_data(directory, extensions: set | None = None, user_id: str | None = 
         for future in as_completed(futures):
             name = futures[future]
             try:
-                future.result()
+                status = future.result()
+                statuses.append((name, status))
             except Exception as e:
                 logger.error("Failed to ingest %s: %s", name, e)
+                statuses.append((name, "error"))
+    return statuses
 
 # Retrieve data from the Ragie index (optionally scoped to user_id via partition)
 def retrieve_data(query, user_id: str | None = None):
@@ -309,16 +468,39 @@ def retrieve_data(query, user_id: str | None = None):
             request["partition"] = _partition_for_user(user_id)
         retrieval_response = ragie.retrievals.retrieve(request=request)
 
-        content = [
-            {
-                **chunk.document_metadata,
-                "text": chunk.text,
+        import json as _json
+        content = []
+        for chunk in retrieval_response.scored_chunks:
+            meta = dict(chunk.document_metadata or {}) if hasattr(chunk.document_metadata, "items") else {}
+            text = (chunk.text or "").strip()
+            video_desc = meta.get("video_description") or ""
+            audio_txt = meta.get("audio_transcript") or ""
+            display_text = ""
+            # 1) Prefer meta from Ragie
+            if video_desc:
+                display_text = video_desc.strip()
+            elif audio_txt:
+                display_text = audio_txt.strip()[:800] + ("..." if len(audio_txt) > 800 else "")
+            # 2) chunk.text is often the full JSON blob; parse it to get video_description / audio_transcript
+            if not display_text and text.startswith("{"):
+                try:
+                    parsed = _json.loads(text)
+                    display_text = (parsed.get("video_description") or parsed.get("audio_transcript") or "").strip()
+                    if display_text:
+                        display_text = display_text[:2000] + ("..." if len(display_text) > 2000 else "")
+                except Exception:
+                    pass
+            # 3) Fallback: use raw text (truncated) so we never return empty display when we have a chunk
+            if not display_text and text:
+                display_text = text[:1500] + ("..." if len(text) > 1500 else "")
+            content.append({
+                **meta,
+                "text": text,
+                "display_text": display_text[:2000] if display_text else "",
                 "document_name": chunk.document_name,
-                "start_time": chunk.metadata.get("start_time"),
-                "end_time": chunk.metadata.get("end_time")
-            }
-            for chunk in retrieval_response.scored_chunks
-        ]
+                "start_time": chunk.metadata.get("start_time") if chunk.metadata else None,
+                "end_time": chunk.metadata.get("end_time") if chunk.metadata else None,
+            })
 
         logger.info(f"Successfully retrieved {len(content)} chunks")
         return content
@@ -328,7 +510,7 @@ def retrieve_data(query, user_id: str | None = None):
         raise
 
 def chunk_video(document_name, start_time, end_time, directory="videos", user_id: str | None = None):
-    """Create a video clip. When user_id is set, output is under video_chunks/{user_id}/ and B2 under users/{user_id}/chunks/."""
+    """Create a video clip. When user_id is set, output is under video_chunks/{user_id}/ and optionally uploaded to Cloudinary."""
     if user_id:
         output_dir = Path("video_chunks") / _partition_for_user(user_id)
     else:
@@ -345,9 +527,11 @@ def chunk_video(document_name, start_time, end_time, directory="videos", user_id
         video_chunk = video.subclipped(start_time, actual_end_time)
         video_chunk.write_videofile(str(output_path))
 
-    b2_prefix = f"users/{user_id}/chunks/" if user_id else "chunks/"
-    b2_key = b2_upload(output_path, f"{b2_prefix}{chunk_filename}")
-    return {"path": output_path, "b2_key": b2_key}
+    storage_url = None
+    if _cloudinary_configured():
+        folder = f"users/{user_id}/chunks" if user_id else "chunks"
+        storage_url = _cloudinary_upload(output_path, folder, public_id=Path(chunk_filename).stem)
+    return {"path": output_path, "b2_key": storage_url}
 
 
 if __name__ == "__main__":

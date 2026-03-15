@@ -22,8 +22,8 @@ ipykernel>=6.29.5
 # YouTube downloader
 yt-dlp>=2024.1.0
 
-# Backblaze B2 storage
-b2sdk>=1.24.0
+# Cloudinary (optional video storage)
+cloudinary>=1.36.0
 
 # FastAPI backend
 fastapi>=0.115.0

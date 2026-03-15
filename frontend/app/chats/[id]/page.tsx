@@ -38,6 +38,50 @@ interface Message {
   created_at: string
 }
 
+type RetrieveChunk = {
+  text: string
+  document_name: string
+  start_time?: number
+  end_time?: number
+  display_text?: string
+  video_description?: string
+  audio_transcript?: string
+}
+
+/** Build a readable chat reply from RAG chunks (no raw JSON). */
+function buildChatReplyFromChunks(chunks: RetrieveChunk[]): string {
+  const parts: string[] = []
+  const seen = new Set<string>()
+  for (const c of chunks) {
+    let content =
+      c.display_text ||
+      c.video_description ||
+      (c.audio_transcript && c.audio_transcript.length > 500 ? c.audio_transcript.slice(0, 500) + '...' : c.audio_transcript) ||
+      (c.text && !c.text.trim().startsWith('{') ? c.text : '')
+    // If still empty, chunk.text might be the JSON blob — parse it
+    if (!content.trim() && c.text?.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(c.text) as { video_description?: string; audio_transcript?: string }
+        content = (parsed.video_description || parsed.audio_transcript || '').slice(0, 800)
+        if ((parsed.audio_transcript?.length ?? 0) > 800) content += '...'
+      } catch {
+        content = c.text.slice(0, 600) + (c.text.length > 600 ? '...' : '')
+      }
+    }
+    if (!content.trim()) continue
+    const timeRange =
+      c.start_time != null && c.end_time != null
+        ? ` (${Math.floor(c.start_time)}s–${Math.floor(c.end_time)}s)`
+        : ''
+    const key = `${c.document_name}:${content.slice(0, 100)}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    parts.push(`**From ${c.document_name}**${timeRange}:\n\n${content.trim()}`)
+  }
+  if (parts.length === 0) return 'No matching segments found in your videos.'
+  return parts.join('\n\n---\n\n')
+}
+
 export default function ChatPage() {
   const params = useParams()
   const chatId = params?.id as string
@@ -74,7 +118,7 @@ export default function ChatPage() {
       await addChatMessage(chatId, 'user', content)
       const res = await retrieve(content)
       const reply = res.chunks?.length
-        ? res.chunks.map((c) => `[${c.document_name}] ${c.text}`).join('\n\n')
+        ? buildChatReplyFromChunks(res.chunks)
         : 'No matching segments found in your videos.'
       await addChatMessage(chatId, 'assistant', reply)
       const updated = await getChat(chatId)

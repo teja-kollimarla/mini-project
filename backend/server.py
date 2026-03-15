@@ -93,7 +93,7 @@ def show_video_tool(document_name: str, start_time: float, end_time: float) -> s
         result = chunk_video(document_name, start_time, end_time)
         msg = "Video chunk created successfully"
         if isinstance(result, dict) and result.get("b2_key"):
-            msg += f" (uploaded to B2: {result['b2_key']})"
+            msg += " (uploaded to Cloudinary)"
         return msg
     except Exception as e:
         return f"Failed to create video chunk: {str(e)}"

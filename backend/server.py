@@ -1,10 +1,43 @@
 from mcp.server.fastmcp import FastMCP
-from main import clear_index, ingest_data, retrieve_data, chunk_video
+from main import (
+    VIDEO_EXTENSIONS,
+    clear_index,
+    ingest_data,
+    retrieve_data,
+    chunk_video,
+    download_youtube,
+)
 
 mcp = FastMCP("ragie")
 
 @mcp.tool()
-def ingest_data_tool(directory: str) -> None:
+def ingest_youtube_tool(url: str, clear_existing: bool = True) -> str:
+    """
+    Download a YouTube video or full playlist and index it in Ragie so the user can chat with it.
+    Use clear_existing=False to add to the existing index instead of replacing it.
+
+    Args:
+        url (str): YouTube video or playlist URL.
+        clear_existing (bool): If True, clear the index before ingesting. If False, append to existing index.
+
+    Returns:
+        str: Status message listing how many videos were downloaded and indexed.
+    """
+    try:
+        if clear_existing:
+            clear_index()
+        files = download_youtube(url, output_dir="videos")
+        if not files:
+            return "No video files downloaded."
+        ingest_data("videos", extensions=VIDEO_EXTENSIONS)
+        summary = ", ".join(files[:10]) + ("..." if len(files) > 10 else "")
+        return f"Downloaded and indexed {len(files)} video(s). Documents: {summary}"
+    except Exception as e:
+        return f"Failed to download or index: {str(e)}"
+
+
+@mcp.tool()
+def ingest_data_tool(directory: str) -> str:
     """
     Loads data from a directory into the Ragie index. Wait until the data is fully ingested before continuing.
 
@@ -57,8 +90,11 @@ def show_video_tool(document_name: str, start_time: float, end_time: float) -> s
         str: A message indicating that the video chunk was created successfully
     """
     try:
-        chunk_video(document_name, start_time, end_time)
-        return "Video chunk created successfully"
+        result = chunk_video(document_name, start_time, end_time)
+        msg = "Video chunk created successfully"
+        if isinstance(result, dict) and result.get("b2_key"):
+            msg += f" (uploaded to B2: {result['b2_key']})"
+        return msg
     except Exception as e:
         return f"Failed to create video chunk: {str(e)}"
 

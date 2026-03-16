@@ -42,16 +42,20 @@ from db_service import (
     record_video,
     record_videos,
     revoke_session,
+    update_video_b2_key,
 )
 from main import (
     VIDEO_EXTENSIONS,
+    _BACKEND_DIR,
     _cloudinary_configured,
+    chunk_video,
+    cloudinary_segment_url,
     clear_index,
+    download_youtube,
     ingest_data,
     ingest_data_from_urls,
+    recover_video_to_cloudinary,
     retrieve_data,
-    chunk_video,
-    download_youtube,
     upload_directory_to_cloudinary,
 )
 
@@ -338,6 +342,7 @@ async def ingest_upload(
         if _cloudinary_configured():
             uploaded_list = upload_directory_to_cloudinary(output_dir, f"users/{user_id}/videos")
             url_by_name = {n: u for n, u in uploaded_list}
+        cloudinary_failed = [n for n in saved_names if _cloudinary_configured() and not url_by_name.get(n)]
         user = get_or_create_user(db, user_id)
         for name in saved_names:
             record_video(db, user.id, name, source="upload", source_url=None, b2_key=url_by_name.get(name))
@@ -357,6 +362,8 @@ async def ingest_upload(
             msg = f"Uploaded {len(saved_names)} video(s). Some still processing; search may work shortly."
         else:
             msg = f"Uploaded {len(saved_names)} video(s). Indexing in progress; search may work in a few minutes."
+        if cloudinary_failed:
+            msg += f" ({len(cloudinary_failed)} not uploaded to Cloudinary—connection reset by remote; saved locally, indexed, and clip playback will use local file.)"
         return IngestUploadResponse(
             success=True,
             message=msg,
@@ -389,9 +396,66 @@ def create_chunk(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    """MCP: show_video_tool. Create a video clip from a segment for this user. Records chunk in DB linked to video if found."""
+    """MCP: show_video_tool. Return a segment URL: Cloudinary so/du if video is on Cloudinary, else create local clip."""
+    user = get_or_create_user(db, user_id)
+    video = get_video_by_user_and_filename(db, user.id, body.document_name)
+    directory = body.directory if body.directory != "videos" else f"videos/{user_id}"
+    video_path = _BACKEND_DIR / directory / body.document_name
+
+    # If video is on Cloudinary: fetch segment via URL params (so=start offset, du=duration) — no download
+    cloudinary_url = video.b2_key if video and video.b2_key else None
+    if cloudinary_url and str(cloudinary_url).startswith("http"):
+        segment_url = cloudinary_segment_url(
+            cloudinary_url, body.start_time, body.end_time
+        )
+        return ChunkResponse(
+            success=True,
+            message="Stream segment from Cloudinary",
+            url=segment_url,
+            filename=None,
+            path=None,
+            b2_key=segment_url,
+        )
+
+    # Not on disk and no Cloudinary: try to recover from source (e.g. YouTube) and add to Cloudinary
+    if not video_path.exists():
+        if video and video.source_url and str(video.source_url).startswith("http") and _cloudinary_configured():
+            cloudinary_url, recover_error = recover_video_to_cloudinary(
+                video.source_url, video_path, user_id
+            )
+            if cloudinary_url:
+                update_video_b2_key(db, video.id, cloudinary_url)
+                segment_url = cloudinary_segment_url(
+                    cloudinary_url, body.start_time, body.end_time
+                )
+                return ChunkResponse(
+                    success=True,
+                    message="Video recovered from source and streamed from Cloudinary",
+                    url=segment_url,
+                    filename=None,
+                    path=None,
+                    b2_key=segment_url,
+                )
+            # Recovery failed: tell user why (e.g. YouTube bot block, Cloudinary upload failed)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Recovery from source failed: {recover_error or 'Unknown error'}. Re-upload the video or try again.",
+            )
+        if not video:
+            raise HTTPException(
+                status_code=404,
+                detail="Video not in database. Ingest or upload the video first.",
+            )
+        if not video.source_url:
+            raise HTTPException(
+                status_code=404,
+                detail="Video not found locally and no source URL (uploaded videos cannot be recovered). Re-upload the video.",
+            )
+        raise HTTPException(
+            status_code=404,
+            detail="Video not found locally and no Cloudinary URL. Re-upload or re-ingest the video.",
+        )
     try:
-        directory = body.directory if body.directory != "videos" else f"videos/{user_id}"
         result = chunk_video(
             body.document_name,
             body.start_time,
@@ -404,8 +468,6 @@ def create_chunk(
         filename = path.name if path else None
         url = f"/api/chunks/files/{filename}?user_id={user_id}" if filename else None
         if filename:
-            user = get_or_create_user(db, user_id)
-            video = get_video_by_user_and_filename(db, user.id, body.document_name)
             record_chunk(
                 db,
                 user.id,
@@ -608,6 +670,9 @@ def get_current_user(
 
 
 # --- Videos (list stored videos for user, including B2 keys) ---
+VIDEOS_BASE = Path(__file__).parent / "videos"
+
+
 @app.get("/api/videos", response_model=list[VideoResponse])
 def list_videos(
     user_id: str = Depends(get_current_user_id),
@@ -628,6 +693,24 @@ def list_videos(
         )
         for v in videos
     ]
+
+
+@app.get("/api/videos/stream/{filename}")
+def stream_video(
+    filename: str,
+    x_user_id: str | None = Header(None, alias="X-User-Id"),
+    user_id: str | None = None,
+):
+    """Stream this user's video file for playback. Use when b2_key is null (local file). Pass user_id query or X-User-Id header."""
+    uid = user_id or x_user_id
+    if not uid:
+        raise HTTPException(status_code=400, detail="user_id query or X-User-Id header required")
+    safe_uid = _safe_user_id(uid)
+    safe_name = Path(filename).name
+    path = VIDEOS_BASE / safe_uid / safe_name
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Video file not found")
+    return FileResponse(path, media_type="video/mp4")
 
 
 # --- Chats and messages ---

@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
-import { Play, Loader2, MoreVertical } from 'lucide-react'
+import { Loader2, MoreVertical } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { DashboardLayout } from '@/components/dashboard-layout'
@@ -12,7 +12,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { listVideos } from '@/lib/api'
+import { listVideos, videoPlayUrl } from '@/lib/api'
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -150,14 +150,16 @@ export default function VideosPage() {
                 whileHover={{ y: -4 }}
               >
                 <Card className="overflow-hidden hover:border-primary/50 transition-all duration-300">
-                  {/* Thumbnail Placeholder */}
-                  <div className="relative w-full aspect-video bg-gradient-to-br from-primary/20 to-accent/20 flex items-center justify-center group cursor-pointer">
-                    <Button
-                      size="icon"
-                      className="bg-primary/80 hover:bg-primary opacity-0 group-hover:opacity-100 transition-opacity"
+                  <div className="relative w-full aspect-video bg-muted">
+                    <video
+                      src={videoPlayUrl(video)}
+                      controls
+                      className="w-full h-full object-contain"
+                      preload="metadata"
+                      playsInline
                     >
-                      <Play className="h-5 w-5" />
-                    </Button>
+                      Your browser does not support the video tag.
+                    </video>
                   </div>
 
                   {/* Content */}

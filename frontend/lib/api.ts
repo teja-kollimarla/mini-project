@@ -227,6 +227,13 @@ export async function listVideos() {
   return handleResponse<Array<{ id: string; filename: string; b2_key: string | null; source: string; source_url: string | null; created_at: string }>>(res)
 }
 
+/** Playback URL for a video: Cloudinary (b2_key) or backend stream for local file. */
+export function videoPlayUrl(video: { b2_key: string | null; filename: string }): string {
+  if (video.b2_key && video.b2_key.startsWith('http')) return video.b2_key
+  const userId = getUserId()
+  return `${API_URL}/api/videos/stream/${encodeURIComponent(video.filename)}?user_id=${encodeURIComponent(userId || '')}`
+}
+
 // --- Chats ---
 export async function listChats() {
   const res = await fetch(`${API_URL}/api/chats`, { headers: authHeaders() })

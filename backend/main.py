@@ -16,6 +16,17 @@ import yt_dlp
 
 load_dotenv()
 
+# Cloudinary: configure once at startup (CLOUDINARY_URL or cloud_name + api_key + api_secret)
+_cloudinary_url = os.getenv("CLOUDINARY_URL", "").strip()
+if _cloudinary_url.startswith("cloudinary://"):
+    cloudinary.config()
+else:
+    _cn = os.getenv("CLOUDINARY_CLOUD_NAME")
+    _ak = os.getenv("CLOUDINARY_API_KEY")
+    _as = os.getenv("CLOUDINARY_API_SECRET")
+    if _cn and _ak and _as:
+        cloudinary.config(cloud_name=_cn, api_key=_ak, api_secret=_as)
+
 # Video file extensions for ingestion and YouTube output
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".m4a"}
 
@@ -61,9 +72,11 @@ ragie = Ragie(
 )
 
 
-# Cloudinary (optional): set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET to enable
+# Cloudinary (optional): set CLOUDINARY_URL or CLOUDINARY_CLOUD_NAME + API_KEY + API_SECRET
 def _cloudinary_configured() -> bool:
-    """True if Cloudinary env vars are set."""
+    """True if Cloudinary is configured (CLOUDINARY_URL or cloud_name + api_key + api_secret)."""
+    if os.getenv("CLOUDINARY_URL", "").strip().startswith("cloudinary://"):
+        return True
     cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME")
     api_key = os.getenv("CLOUDINARY_API_KEY")
     api_secret = os.getenv("CLOUDINARY_API_SECRET")
@@ -79,46 +92,100 @@ def _cloudinary_sanitize_id(s: str, allow_slash: bool = False) -> str:
     return out or "video"
 
 
+def _is_connection_error(e: Exception) -> bool:
+    """True if error is likely connection abort/reset (e.g. 10053 local, 10054 remote host closed)."""
+    s = str(e).lower()
+    return (
+        "10053" in str(e)
+        or "10054" in str(e)
+        or "connection" in s
+        or "abort" in s
+        or "reset" in s
+        or "broken pipe" in s
+        or "econnreset" in s
+        or "forcibly closed" in s
+    )
+
+
+def _is_cloudinary_plan_limit_error(e: Exception) -> bool:
+    """True if Cloudinary rejected due to file size limit (e.g. free tier 100 MB max)."""
+    s = str(e)
+    return "file size too large" in s.lower() or "maximum is 104857600" in s.lower() or "upgrade your plan" in s.lower()
+
+
 def _cloudinary_upload(local_path: Path, folder: str, public_id: str | None = None) -> str | None:
-    """Upload a file to Cloudinary as video. Uses the video upload URL explicitly to avoid 'Image file format' errors."""
-    cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME")
-    api_key = os.getenv("CLOUDINARY_API_KEY")
-    api_secret = os.getenv("CLOUDINARY_API_SECRET")
-    if not all((cloud_name, api_key, api_secret)):
+    """Upload a file to Cloudinary as video using the official Python SDK (upload / upload_large). Config set at startup."""
+    if not _cloudinary_configured():
         return None
     pid = _cloudinary_sanitize_id((public_id or local_path.stem) or "video", allow_slash=False)
     folder_clean = _cloudinary_sanitize_id(folder, allow_slash=True) or None
+    file_size_mb = local_path.stat().st_size / (1024 * 1024)
+    # SDK params; resource_type="video" passed explicitly so SDK uses video endpoint (not image)
+    opts = {
+        "public_id": pid,
+        "overwrite": True,
+    }
+    if folder_clean:
+        opts["asset_folder"] = folder_clean
+    max_attempts = 5
+    backoff = 15  # longer wait when remote host closes connection (10054)
     try:
-        cloudinary.config(
-            cloud_name=cloud_name,
-            api_key=api_key,
-            api_secret=api_secret,
-        )
-        # Build params and sign; use video upload URL explicitly (some SDK paths default to image)
-        from cloudinary import utils as cld_utils
-        params = {"timestamp": cld_utils.now(), "public_id": pid}
-        if folder_clean:
-            params["folder"] = folder_clean
-        options = {"resource_type": "video", "api_key": api_key, "api_secret": api_secret}
-        params = cld_utils.sign_request(params, options)
-        # POST to video upload endpoint explicitly
-        upload_url = f"https://api.cloudinary.com/v1_1/{cloud_name}/video/upload"
-        with open(local_path, "rb") as f:
-            file_bytes = f.read()
-        # Multipart: file + signed params (Cloudinary expects 'file' field for the binary)
-        files = {"file": (local_path.name, file_bytes, "video/mp4")}
-        data = {k: (str(v) if v is not None else "") for k, v in params.items() if v is not None}
-        with httpx.Client(timeout=300.0) as client:
-            r = client.post(upload_url, data=data, files=files)
-        if r.status_code != 200:
-            body = r.text
-            logger.warning("Cloudinary upload failed %s: %s", r.status_code, body[:500] if body else "")
+        # Large files (> 100 MB): use upload_large. Cloudinary requires chunks > 5 MB; default 6 MB per docs.
+        # Use larger chunks for very large files (e.g. 1 GB) to reduce round-trips and connection drops.
+        if file_size_mb > 100:
+            opts["chunk_size"] = 6_000_000   # 6 MB per Cloudinary docs (min > 5 MB)
+            if file_size_mb > 500:
+                opts["chunk_size"] = 50_000_000   # 50 MB for 1 GB+ files
+            elif file_size_mb > 200:
+                opts["chunk_size"] = 20_000_000   # 20 MB for 200–500 MB
+            logger.info("Cloudinary upload_large: %s (%.0f MB), chunk_size=%s MB", local_path.name, file_size_mb, opts["chunk_size"] // 1_000_000)
+            for attempt in range(max_attempts):
+                try:
+                    result = cloudinary.uploader.upload_large(
+                        str(local_path), resource_type="video", **opts
+                    )
+                    secure_url = result.get("secure_url") if isinstance(result, dict) else None
+                    if secure_url:
+                        logger.info("Uploaded to Cloudinary (chunked): %s", secure_url)
+                    return secure_url
+                except Exception as e:
+                    if _is_cloudinary_plan_limit_error(e):
+                        logger.warning(
+                            "Cloudinary plan limit: %s (%.0f MB) exceeds your plan's max file size (e.g. 100 MB on free tier). "
+                            "Video saved locally and indexed; upgrade at https://www.cloudinary.com/pricing for larger uploads.",
+                            local_path.name, file_size_mb,
+                        )
+                        return None
+                    if attempt < max_attempts - 1 and _is_connection_error(e):
+                        wait = backoff * (attempt + 1)
+                        logger.warning("Chunked upload attempt %s/%s failed: %s. Retrying in %ss...", attempt + 1, max_attempts, e, wait)
+                        time.sleep(wait)
+                        continue
+                    logger.warning(
+                        "Cloudinary upload_large failed for %s after %s retries: %s. Video is saved locally and will still be indexed; segment playback will use local clips.",
+                        local_path.name, max_attempts, e,
+                    )
+                    return None
             return None
-        out = r.json()
-        secure_url = out.get("secure_url")
-        if secure_url:
-            logger.info("Uploaded to Cloudinary: %s", secure_url)
-        return secure_url
+        # Smaller files: upload() — pass resource_type="video" so SDK uses video endpoint (avoids "Image file format mp4 not allowed")
+        for attempt in range(max_attempts):
+            try:
+                result = cloudinary.uploader.upload(
+                    str(local_path), resource_type="video", **opts
+                )
+                secure_url = result.get("secure_url") if isinstance(result, dict) else None
+                if secure_url:
+                    logger.info("Uploaded to Cloudinary: %s", secure_url)
+                return secure_url
+            except Exception as e:
+                if attempt < max_attempts - 1 and _is_connection_error(e):
+                    wait = backoff * (attempt + 1)
+                    logger.warning("Upload attempt %s/%s failed: %s. Retrying in %ss...", attempt + 1, max_attempts, e, wait)
+                    time.sleep(wait)
+                    continue
+                logger.warning("Cloudinary upload failed for %s: %s", local_path.name, e)
+                return None
+        return None
     except Exception as e:
         logger.warning("Cloudinary upload failed for %s: %s", local_path.name, e)
         return None
@@ -509,18 +576,102 @@ def retrieve_data(query, user_id: str | None = None):
         logger.error(f"Failed to retrieve data: {str(e)}")
         raise
 
+# Base dir for videos and video_chunks (backend folder), so paths work regardless of process cwd
+_BACKEND_DIR = Path(__file__).resolve().parent
+
+
+def recover_video_to_cloudinary(
+    source_url: str,
+    video_path: Path,
+    user_id: str,
+) -> tuple[str | None, str]:
+    """
+    When video is missing locally and not on Cloudinary: fetch from source_url (YouTube or direct URL),
+    save to video_path, upload to Cloudinary.
+    Returns (secure_url or None, error_message for logging/API).
+    """
+    if not source_url or not str(source_url).strip().startswith("http"):
+        return None, "No source_url or invalid URL in database"
+    if not _cloudinary_configured():
+        return None, "Cloudinary not configured; set CLOUDINARY_* env vars"
+    video_path = Path(video_path)
+    try:
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return None, f"Cannot create directory: {e!s}"
+    try:
+        if _is_youtube_page_url(source_url):
+            logger.info("Recovery: re-downloading from YouTube %s", source_url[:80])
+            directory = str(video_path.parent)
+            results = download_youtube(source_url, output_dir=directory, user_id=user_id)
+            if not results:
+                return None, "YouTube download returned no files (check cookies or bot detection)"
+            _name, cloudinary_url = results[0]
+            if cloudinary_url and str(cloudinary_url).startswith("http"):
+                first_path = video_path.parent / _name
+                if first_path.exists() and first_path != video_path:
+                    shutil.move(str(first_path), str(video_path))
+                return cloudinary_url, ""
+            first_path = video_path.parent / _name
+            if first_path.exists():
+                if first_path != video_path:
+                    shutil.move(str(first_path), str(video_path))
+                folder = f"users/{user_id}/videos"
+                url = _cloudinary_upload(video_path, folder, public_id=video_path.stem)
+                return url, "" if url else "Cloudinary upload failed after download"
+            return None, "Downloaded file not found on disk"
+        # Direct video URL
+        logger.info("Recovery: downloading from direct URL")
+        download_video_from_url(source_url, video_path)
+        folder = f"users/{user_id}/videos"
+        url = _cloudinary_upload(video_path, folder, public_id=video_path.stem)
+        return url, "" if url else "Cloudinary upload failed"
+    except Exception as e:
+        logger.warning("Recovery to Cloudinary failed: %s", e, exc_info=True)
+        return None, str(e)
+
+
+def cloudinary_segment_url(secure_url: str, start_time: float, end_time: float) -> str:
+    """Build a Cloudinary URL that streams only the segment using so (start offset) and du (duration)."""
+    if not secure_url or "/upload/" not in secure_url:
+        return secure_url or ""
+    so = max(0.0, start_time)
+    du = max(0.1, end_time - start_time)
+    trans = f"so_{so:.1f},du_{du:.1f}"
+    idx = secure_url.find("/upload/") + len("/upload/")
+    return secure_url[:idx] + trans + "/" + secure_url[idx:]
+
+
+def download_video_from_url(url: str, local_path: Path, timeout: float = 300.0) -> None:
+    """Download a video from URL (e.g. Cloudinary) to local_path. Streams to file to avoid large memory use."""
+    if not url or not str(url).startswith("http"):
+        raise ValueError("Invalid video URL")
+    local_path = Path(local_path)
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        with client.stream("GET", url) as r:
+            r.raise_for_status()
+            with open(local_path, "wb") as f:
+                for chunk in r.iter_bytes(chunk_size=65536):
+                    f.write(chunk)
+    logger.info("Downloaded video from URL to %s", local_path)
+
+
 def chunk_video(document_name, start_time, end_time, directory="videos", user_id: str | None = None):
     """Create a video clip. When user_id is set, output is under video_chunks/{user_id}/ and optionally uploaded to Cloudinary."""
     if user_id:
-        output_dir = Path("video_chunks") / _partition_for_user(user_id)
+        output_dir = _BACKEND_DIR / "video_chunks" / _partition_for_user(user_id)
     else:
-        output_dir = Path("video_chunks")
+        output_dir = _BACKEND_DIR / "video_chunks"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     chunk_filename = f"video_chunk_{start_time:.1f}_{end_time:.1f}.mp4"
     output_path = output_dir / chunk_filename
 
-    video_path = Path(directory) / document_name
+    # Resolve video path relative to backend dir so it works whether cwd is project root or backend
+    video_path = _BACKEND_DIR / directory / document_name
+    if not video_path.exists():
+        raise FileNotFoundError(f"Video not found: {video_path}")
     with VideoFileClip(str(video_path)) as video:
         video_duration = video.duration
         actual_end_time = min(end_time, video_duration) if end_time is not None else video_duration

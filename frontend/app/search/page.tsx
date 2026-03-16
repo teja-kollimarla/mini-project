@@ -68,7 +68,8 @@ export default function SearchPage() {
     setCreatingClip(key)
     try {
       const res = await createChunk(doc.document_name, start, end)
-      if (res.url) window.open(clipPlayUrl(res.filename!), '_blank')
+      if (res.url?.startsWith('http')) window.open(res.url, '_blank')
+      else if (res.filename) window.open(clipPlayUrl(res.filename!), '_blank')
     } finally {
       setCreatingClip(null)
     }

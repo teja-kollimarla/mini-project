@@ -136,6 +136,14 @@ def get_video_by_user_and_filename(db: Session, user_internal_id: str, filename:
     return db.query(Video).filter(Video.user_id == user_internal_id, Video.filename == filename).first()
 
 
+def update_video_b2_key(db: Session, video_id: str, b2_key: str | None) -> None:
+    """Update a video's Cloudinary URL (b2_key) after recovery from source."""
+    v = db.query(Video).filter(Video.id == video_id).first()
+    if v:
+        v.b2_key = b2_key
+        db.commit()
+
+
 def record_chunk(
     db: Session,
     user_id: str,

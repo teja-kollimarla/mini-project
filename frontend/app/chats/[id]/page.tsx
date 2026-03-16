@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input'
 import { Card } from '@/components/ui/card'
 import { DashboardLayout } from '@/components/dashboard-layout'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
-import { getChat, addChatMessage, retrieve } from '@/lib/api'
+import { getChat, addChatMessage, retrieve, createChunk, clipPlayUrl } from '@/lib/api'
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -36,6 +36,22 @@ interface Message {
   role: 'user' | 'assistant'
   content: string
   created_at: string
+}
+
+/** Assistant message can store rich content: { text, chunk_refs } for "Watch segment" links */
+interface AssistantContent {
+  text: string
+  chunk_refs?: Array< { document_name: string; start_time: number; end_time: number } >
+}
+
+function parseAssistantContent(content: string): { text: string; chunk_refs?: AssistantContent['chunk_refs'] } | null {
+  try {
+    const parsed = JSON.parse(content) as AssistantContent
+    if (typeof parsed?.text === 'string') return parsed
+  } catch {
+    /* plain text */
+  }
+  return null
 }
 
 type RetrieveChunk = {
@@ -89,7 +105,22 @@ export default function ChatPage() {
   const [inputValue, setInputValue] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [clippingSegment, setClippingSegment] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  const handleWatchSegment = async (doc: string, start: number, end: number) => {
+    const key = `${doc}:${start}-${end}`
+    setClippingSegment(key)
+    try {
+      const res = await createChunk(doc, start, end)
+      if (res.url?.startsWith('http')) window.open(res.url, '_blank')
+      else if (res.filename) window.open(clipPlayUrl(res.filename), '_blank')
+    } catch {
+      setLoadError('Failed to create clip')
+    } finally {
+      setClippingSegment(null)
+    }
+  }
 
   useEffect(() => {
     if (!chatId) return
@@ -120,7 +151,18 @@ export default function ChatPage() {
       const reply = res.chunks?.length
         ? buildChatReplyFromChunks(res.chunks)
         : 'No matching segments found in your videos.'
-      await addChatMessage(chatId, 'assistant', reply)
+      const chunk_refs = (res.chunks ?? [])
+        .filter((c) => c.start_time != null && c.end_time != null)
+        .map((c) => ({
+          document_name: c.document_name,
+          start_time: c.start_time!,
+          end_time: c.end_time!,
+        }))
+      const assistantContent =
+        chunk_refs.length > 0
+          ? JSON.stringify({ text: reply, chunk_refs })
+          : reply
+      await addChatMessage(chatId, 'assistant', assistantContent)
       const updated = await getChat(chatId)
       setChat((prev) => (prev ? { ...prev, messages: updated.messages as Message[] } : null))
     } catch (err) {
@@ -193,14 +235,58 @@ export default function ChatPage() {
                     : 'bg-card border border-border rounded-lg rounded-tl-none'
                 } p-4`}
               >
-                <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
-                <p className={`text-xs mt-2 ${
-                  message.role === 'user'
-                    ? 'text-primary-foreground/70'
-                    : 'text-muted-foreground'
-                }`}>
-                  {new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                </p>
+                {message.role === 'assistant' ? (() => {
+                  const parsed = parseAssistantContent(message.content)
+                  const displayText = parsed?.text ?? message.content
+                  const refs = parsed?.chunk_refs ?? []
+                  return (
+                    <>
+                      <p className="text-sm leading-relaxed whitespace-pre-wrap">{displayText}</p>
+                      {refs.length > 0 && (
+                        <div className="mt-3 pt-3 border-t border-border/50 space-y-2">
+                          <p className="text-xs font-medium text-muted-foreground">Watch segments:</p>
+                          <div className="flex flex-wrap gap-2">
+                            {refs.map((r, i) => {
+                              const key = `${r.document_name}:${r.start_time}-${r.end_time}`
+                              const label = `${Math.floor(r.start_time)}s–${Math.floor(r.end_time)}s`
+                              const isClipping = clippingSegment === key
+                              return (
+                                <Button
+                                  key={key + i}
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  className="text-xs"
+                                  disabled={isClipping}
+                                  onClick={() => handleWatchSegment(r.document_name, r.start_time, r.end_time)}
+                                >
+                                  {isClipping ? (
+                                    <>
+                                      <Loader2 className="h-3 w-3 animate-spin mr-1.5" />
+                                      Creating…
+                                    </>
+                                  ) : (
+                                    <>▶ {label}</>
+                                  )}
+                                </Button>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      )}
+                      <p className="text-xs mt-2 text-muted-foreground">
+                        {new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </p>
+                    </>
+                  )
+                })() : (
+                  <>
+                    <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
+                    <p className="text-xs mt-2 text-primary-foreground/70">
+                      {new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </p>
+                  </>
+                )}
               </div>
 
               {message.role === 'user' && (

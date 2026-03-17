@@ -269,6 +269,15 @@ export async function addChatMessage(chatId: string, role: 'user' | 'assistant',
   return handleResponse<{ id: string; role: string; content: string; created_at: string }>(res)
 }
 
+export async function updateChat(chatId: string, updates: { title?: string | null }) {
+  const res = await fetch(`${API_URL}/api/chats/${chatId}`, {
+    method: 'PATCH',
+    headers: authHeaders(),
+    body: JSON.stringify({ title: updates.title ?? null }),
+  })
+  return handleResponse<{ id: string; title: string | null; updated_at: string }>(res)
+}
+
 // --- User ---
 export async function getCurrentUser() {
   const res = await fetch(`${API_URL}/api/users/me`, { headers: authHeaders() })

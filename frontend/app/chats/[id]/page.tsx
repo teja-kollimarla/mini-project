@@ -2,14 +2,16 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { useParams } from 'next/navigation'
+import dynamic from 'next/dynamic'
 import { motion } from 'framer-motion'
 import { Send, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Card } from '@/components/ui/card'
 import { DashboardLayout } from '@/components/dashboard-layout'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
-import { getChat, addChatMessage, retrieve, createChunk, clipPlayUrl } from '@/lib/api'
+import { getChat, addChatMessage, retrieve, createChunk, clipPlayUrl, updateChat } from '@/lib/api'
+import DOMPurify from 'dompurify'
+
+const ReactQuill = dynamic(() => import('react-quill'), { ssr: false })
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -52,6 +54,20 @@ function parseAssistantContent(content: string): { text: string; chunk_refs?: As
     /* plain text */
   }
   return null
+}
+
+function stripHtmlToText(html: string): string {
+  if (!html) return ''
+  if (typeof window === 'undefined') return html
+  const el = document.createElement('div')
+  el.innerHTML = html
+  const text = (el.textContent || el.innerText || '').replace(/\u00a0/g, ' ')
+  return text
+}
+
+function isProbablyHtml(s: string): boolean {
+  const t = (s || '').trim()
+  return t.startsWith('<') && t.includes('>')
 }
 
 type RetrieveChunk = {
@@ -141,12 +157,24 @@ export default function ChatPage() {
     e.preventDefault()
     if (!inputValue.trim() || !chatId || !chat) return
 
-    const content = inputValue.trim()
+    const html = inputValue.trim()
+    const content = stripHtmlToText(html).trim()
+    if (!content) return
     setInputValue('')
     setIsLoading(true)
 
     try {
-      await addChatMessage(chatId, 'user', content)
+      // If chat has no title yet, set it from the first user message (persist so chats list isn't "Untitled")
+      if (!chat.title || !chat.title.trim()) {
+        const t = content.length > 60 ? content.slice(0, 60) + '…' : content
+        try {
+          await updateChat(chatId, { title: t })
+          setChat((prev) => (prev ? { ...prev, title: t } : prev))
+        } catch {
+          // non-fatal: chat still works even if title update fails
+        }
+      }
+      await addChatMessage(chatId, 'user', html)
       const res = await retrieve(content)
       const reply = res.chunks?.length
         ? buildChatReplyFromChunks(res.chunks)
@@ -193,9 +221,18 @@ export default function ChatPage() {
 
   const messages = chat.messages
 
+  const derivedTitle = (() => {
+    const t = (chat.title || '').trim()
+    if (t) return t
+    const firstUserRaw = messages.find((m) => m.role === 'user')?.content?.trim() || ''
+    const firstUser = stripHtmlToText(firstUserRaw).trim()
+    if (!firstUser) return 'New chat'
+    return firstUser.length > 60 ? firstUser.slice(0, 60) + '…' : firstUser
+  })()
+
   return (
     <DashboardLayout>
-      <div className="h-[calc(100vh-140px)] flex flex-col max-w-4xl">
+      <div className="h-[calc(100vh-140px)] flex flex-col w-full max-w-5xl mx-auto">
         {/* Chat Header */}
         <motion.div
           className="mb-6 pb-4 border-b border-border"
@@ -203,13 +240,13 @@ export default function ChatPage() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4 }}
         >
-          <h1 className="text-2xl font-bold">{chat.title || 'Chat'}</h1>
+          <h1 className="text-2xl font-semibold">{derivedTitle}</h1>
           <p className="text-sm text-muted-foreground">Ask about your videos — answers are from your indexed content</p>
         </motion.div>
 
         {/* Messages */}
         <motion.div
-          className="flex-1 overflow-y-auto space-y-4 mb-6 pr-4"
+          className="flex-1 overflow-y-auto space-y-6 mb-4 px-1 pr-2"
           variants={containerVariants}
           initial="hidden"
           animate="visible"
@@ -229,11 +266,11 @@ export default function ChatPage() {
               )}
 
               <div
-                className={`max-w-md lg:max-w-xl ${
+                className={`max-w-[85%] ${
                   message.role === 'user'
-                    ? 'bg-primary text-primary-foreground rounded-lg rounded-tr-none'
-                    : 'bg-card border border-border rounded-lg rounded-tl-none'
-                } p-4`}
+                    ? 'bg-primary text-primary-foreground rounded-2xl rounded-tr-md'
+                    : 'bg-card border border-border rounded-2xl rounded-tl-md'
+                } px-4 py-3`}
               >
                 {message.role === 'assistant' ? (() => {
                   const parsed = parseAssistantContent(message.content)
@@ -281,10 +318,14 @@ export default function ChatPage() {
                   )
                 })() : (
                   <>
-                    <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
-                    <p className="text-xs mt-2 text-primary-foreground/70">
-                      {new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </p>
+                    {isProbablyHtml(message.content) ? (
+                      <div
+                        className="text-sm leading-relaxed prose prose-invert:prose-invert max-w-none"
+                        dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(message.content) }}
+                      />
+                    ) : (
+                      <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
+                    )}
                   </>
                 )}
               </div>
@@ -326,30 +367,28 @@ export default function ChatPage() {
         {/* Input */}
         <motion.form
           onSubmit={handleSendMessage}
-          className="flex gap-2"
+          className="sticky bottom-0 bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t border-border pt-4 pb-2"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4 }}
         >
-          <Input
-            placeholder="Ask something about your videos..."
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            disabled={isLoading}
-            className="bg-background border-border"
-          />
-          <Button
-            type="submit"
-            disabled={!inputValue.trim() || isLoading}
-            size="icon"
-            className="gap-2"
-          >
-            {isLoading ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Send className="h-4 w-4" />
-            )}
-          </Button>
+          <div className="flex gap-2 items-end">
+            <div className="flex-1">
+              <ReactQuill
+                theme="snow"
+                value={inputValue}
+                onChange={setInputValue}
+                readOnly={isLoading}
+                placeholder="Message…"
+                modules={{
+                  toolbar: [[{ header: [false, 2, 3] }], ['bold', 'italic', 'underline'], [{ list: 'ordered' }, { list: 'bullet' }], ['clean']],
+                }}
+              />
+            </div>
+            <Button type="submit" disabled={!inputValue.trim() || isLoading} size="icon">
+              {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+            </Button>
+          </div>
         </motion.form>
       </div>
     </DashboardLayout>

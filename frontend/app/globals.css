@@ -1,5 +1,6 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
+@import 'react-quill/dist/quill.snow.css';
 
 @custom-variant dark (&:is(.dark *));
 
@@ -38,6 +39,31 @@
   --sidebar-accent-foreground: oklch(0.25 0.02 280);
   --sidebar-border: oklch(0.9 0.01 280);
   --sidebar-ring: oklch(0.5 0.15 280);
+}
+
+/* Quill editor theme tweaks */
+.ql-toolbar.ql-snow {
+  border-color: hsl(var(--border));
+  background: transparent;
+  border-top-left-radius: calc(var(--radius) - 2px);
+  border-top-right-radius: calc(var(--radius) - 2px);
+}
+.ql-container.ql-snow {
+  border-color: hsl(var(--border));
+  background: transparent;
+  border-bottom-left-radius: calc(var(--radius) - 2px);
+  border-bottom-right-radius: calc(var(--radius) - 2px);
+}
+.ql-editor {
+  min-height: 44px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 10px 12px;
+}
+.ql-editor p,
+.ql-editor li {
+  font-size: 14px;
+  line-height: 1.5;
 }
 
 .dark {

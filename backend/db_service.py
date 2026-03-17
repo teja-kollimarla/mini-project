@@ -127,6 +127,17 @@ def get_chat_with_messages(db: Session, chat_id: str, user_id: str) -> Chat | No
     return db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user_id).first()
 
 
+def update_chat_title(db: Session, chat_id: str, user_id: str, title: str | None) -> Chat | None:
+    """Update a chat title (scoped to user)."""
+    chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user_id).first()
+    if not chat:
+        return None
+    chat.title = title
+    db.commit()
+    db.refresh(chat)
+    return chat
+
+
 def get_user_videos(db: Session, user_id: str, limit: int = 200):
     return db.query(Video).filter(Video.user_id == user_id).order_by(Video.created_at.desc()).limit(limit).all()
 

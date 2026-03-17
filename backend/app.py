@@ -42,6 +42,7 @@ from db_service import (
     record_video,
     record_videos,
     revoke_session,
+    update_chat_title,
     update_video_b2_key,
 )
 from main import (
@@ -208,6 +209,10 @@ class ChatCreate(BaseModel):
 class MessageCreate(BaseModel):
     role: str = Field(..., pattern="^(user|assistant)$")
     content: str = Field(..., min_length=1)
+
+
+class ChatUpdate(BaseModel):
+    title: str | None = None
 
 
 @app.on_event("startup")
@@ -762,6 +767,21 @@ def get_chat(
             for m in chat.messages
         ],
     }
+
+
+@app.patch("/api/chats/{chat_id}")
+def update_chat(
+    chat_id: str,
+    body: ChatUpdate,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Update a chat (currently only title)."""
+    user = get_or_create_user(db, user_id)
+    chat = update_chat_title(db, chat_id, user.id, body.title)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return {"id": chat.id, "title": chat.title, "updated_at": chat.updated_at.isoformat()}
 
 
 @app.post("/api/chats/{chat_id}/messages")

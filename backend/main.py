@@ -82,6 +82,14 @@ def _partition_for_user(user_id: str) -> str:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Startup diagnostics: confirm ffmpeg is reachable and log backend dir
+_BACKEND_DIR = Path(__file__).resolve().parent
+logger.info("Backend directory: %s", _BACKEND_DIR)
+if shutil.which(_ffmpeg_exe):
+    logger.info("ffmpeg found: %s", shutil.which(_ffmpeg_exe))
+else:
+    logger.warning("ffmpeg NOT found at '%s' — video merging/clipping will fail", _ffmpeg_exe)
+
 # Gemini/OpenAI/OpenRouter (optional) for LLM answers from retrieved chunks
 _gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
 _gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()
@@ -423,12 +431,15 @@ def _download_one_video(
     Returns list of (filename, b2_key) for the new file(s) (usually 1).
     """
     out_tmpl = str(output_path / "%(id)s_%(title).80s.%(ext)s")
-    format_str = "best[ext=mp4]/best[ext=mp4]/best"
+    format_str = "best[ext=mp4]/best"
     opts = {
         "outtmpl": out_tmpl,
         "format": format_str,
+        "merge_output_format": "mp4",
         "quiet": False,
         "no_warnings": False,
+        "retries": 3,
+        "fragment_retries": 3,
         **_yt_dlp_cookie_opts(),
         **_yt_dlp_youtube_opts(),
     }
@@ -452,8 +463,9 @@ def download_youtube(
     Download videos in parallel; upload to Cloudinary after all downloads finish when configured.
     Returns list of (filename, cloudinary_url or None).
     """
-    output_path = Path(output_dir)
+    output_path = Path(output_dir).resolve()
     output_path.mkdir(parents=True, exist_ok=True)
+    logger.info("Download directory resolved to: %s", output_path)
     urls = _extract_video_urls(url)
     urls = [u for u in urls if _is_youtube_page_url(u)]  # never pass direct stream URLs (invalid filename)
     if not urls:

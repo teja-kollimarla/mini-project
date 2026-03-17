@@ -437,18 +437,6 @@ def _download_one_video(
     Download one video only (no B2 here — upload after all workers finish to avoid 0-byte uploads).
     Returns list of (filename, b2_key) for the new file(s) (usually 1).
     """
-    opts = {
-        "outtmpl": out_tmpl,
-        "format": format_str,
-        "merge_output_format": "mp4",
-        "quiet": False,
-        "no_warnings": False,
-        "retries": 5,
-        "fragment_retries": 5,
-        "noplaylist": True,
-        **_yt_dlp_cookie_opts(),
-        **_yt_dlp_youtube_opts(),
-    }
     out_tmpl = str(output_path / "%(id)s_%(title).80s.%(ext)s")
     format_str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4"
     opts = {

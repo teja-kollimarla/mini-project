@@ -82,7 +82,22 @@ def _partition_for_user(user_id: str) -> str:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# OpenRouter (optional) for LLM answers from retrieved chunks
+# Gemini/OpenAI/OpenRouter (optional) for LLM answers from retrieved chunks
+_gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+_gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()
+_gemini_client: OpenAI | None = None
+if _gemini_key:
+    _gemini_client = OpenAI(
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        api_key=_gemini_key,
+    )
+
+_openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+_openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+_openai_client: OpenAI | None = None
+if _openai_key:
+    _openai_client = OpenAI(api_key=_openai_key)
+
 _openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
 _openrouter_model = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free").strip()
 _openrouter_fallback_models = [
@@ -126,6 +141,54 @@ def _openrouter_models() -> list[str]:
         if m and m not in out:
             out.append(m)
     return out
+
+
+def _answer_models() -> list[tuple[OpenAI, str]]:
+    """Preferred answer providers, in order."""
+    out: list[tuple[OpenAI, str]] = []
+    if _gemini_client:
+        out.append((_gemini_client, _gemini_model))
+    if _openai_client:
+        out.append((_openai_client, _openai_model))
+    if _openrouter_client:
+        for model in _openrouter_models():
+            out.append((_openrouter_client, model))
+    return out
+
+
+def _strip_markdown_json(content: str) -> str:
+    """Remove ```json ... ``` fences around JSON, if present."""
+    s = (content or "").strip()
+    if not s.startswith("```"):
+        return s
+    # Drop leading backticks and optional language tag
+    s = s.lstrip("`")
+    nl = s.find("\n")
+    if nl != -1:
+        s = s[nl + 1 :]
+    # Drop trailing ```
+    if s.endswith("```"):
+        s = s[: -3]
+    return s.strip()
+
+
+def _phi3_fallback_answer(prompt: str) -> dict | None:
+    """
+    Final fallback: call external phi-3 endpoint that returns {"reply": "..."}.
+    Endpoint: https://phi-3-production.up.railway.app/chat
+    """
+    url = "https://phi-3-production.up.railway.app/chat"
+    try:
+        resp = httpx.post(url, json={"prompt": prompt}, timeout=15.0)
+        resp.raise_for_status()
+        data = resp.json()
+        reply = (data.get("reply") or "").strip()
+        if not reply:
+            return None
+        return {"text": reply, "html": ""}
+    except Exception as e:
+        logger.warning("phi-3 fallback failed: %s", e)
+        return None
 
 
 def _is_rate_limit_error(e: Exception) -> bool:
@@ -658,20 +721,21 @@ def llm_answer_from_chunks(query: str, chunks: list[dict]) -> dict | None:
     Optional: synthesize a final answer using an LLM, grounded in retrieved Ragie chunks.
     Returns {"text": str, "html": str} or None if not configured/failed.
     """
-    if not _openrouter_client:
+    providers = _answer_models()
+    if not providers:
         return None
     try:
-        # Keep prompt bounded (avoid huge context)
-        top = (chunks or [])[:8]
+        # Include the full retrieved set so Gemini can synthesize across every relevant chunk.
+        top = chunks or []
         ctx_lines: list[str] = []
         for c in top:
             doc = str(c.get("document_name") or "")
             st = c.get("start_time")
             et = c.get("end_time")
-            t = (c.get("display_text") or c.get("video_description") or c.get("audio_transcript") or c.get("text") or "").strip()
+            t = (c.get("display_text") or c.get("audio_transcript") or c.get("video_description") or c.get("text") or "").strip()
             if not t:
                 continue
-            t = t[:1200]
+            t = t[:1600]
             tr = ""
             if st is not None and et is not None:
                 tr = f" ({int(float(st))}s–{int(float(et))}s)"
@@ -681,7 +745,11 @@ def llm_answer_from_chunks(query: str, chunks: list[dict]) -> dict | None:
             return None
 
         system = (
-            "You answer questions about the user's videos using ONLY the provided evidence snippets.\n"
+            "You are a tutoring assistant for a video-learning app.\n"
+            "Answer the user's query using ONLY the provided evidence snippets.\n"
+            "Use the snippets to explain the concept being asked in a clear, educational way.\n"
+            "Prefer transcript/definition content over scene descriptions. Do not describe the people, camera, whiteboard, or background unless the user explicitly asks for visual details.\n"
+            "If multiple snippets relate to the same concept, combine them into one concise explanation.\n"
             "If the evidence is insufficient, say so and ask a short clarifying question.\n"
             "Return your response as JSON with keys: text (plain text) and html (simple HTML using <p>, <strong>, <ul>, <li>, <hr>)."
         )
@@ -692,9 +760,9 @@ def llm_answer_from_chunks(query: str, chunks: list[dict]) -> dict | None:
             return cached
 
         last_err: Exception | None = None
-        for model in _openrouter_models():
+        for client, model in providers:
             try:
-                resp = _openrouter_client.chat.completions.create(
+                resp = client.chat.completions.create(
                     model=model,
                     messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
                     temperature=0.2,
@@ -704,7 +772,7 @@ def llm_answer_from_chunks(query: str, chunks: list[dict]) -> dict | None:
                     continue
                 import json as _json
                 try:
-                    parsed = _json.loads(content)
+                    parsed = _json.loads(_strip_markdown_json(content))
                     if isinstance(parsed, dict) and isinstance(parsed.get("text"), str):
                         html = parsed.get("html")
                         out = {"text": parsed["text"], "html": html if isinstance(html, str) else ""}
@@ -719,8 +787,15 @@ def llm_answer_from_chunks(query: str, chunks: list[dict]) -> dict | None:
                 last_err = e
                 # On rate-limit, try fallbacks (if configured); otherwise bail quickly
                 if _is_rate_limit_error(e):
+                    time.sleep(1)  # brief backoff before trying next provider
                     continue
                 break
+        # If all primary providers failed, try phi-3 HTTP fallback before giving up.
+        fallback_prompt = f"Question: {query}\n\nEvidence snippets:\n" + "\n".join(ctx_lines)
+        phi_ans = _phi3_fallback_answer(fallback_prompt)
+        if phi_ans:
+            _cache_put(cache_key, phi_ans)
+            return phi_ans
         if last_err:
             raise last_err
         return None
@@ -739,6 +814,44 @@ def _chunk_text_blob(c: dict) -> str:
         + " "
         + str(c.get("text") or "")
     ).strip()
+
+
+def _rank_chunks_for_query(query: str, chunks: list[dict], limit: int = 3) -> list[dict]:
+    """Return the chunks with the strongest query-token overlap first."""
+    q = (query or "").lower()
+    if not q or not chunks:
+        return chunks[:limit]
+
+    stop = {
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "this",
+        "that",
+        "what",
+        "why",
+        "how",
+        "can",
+        "you",
+        "me",
+        "tell",
+        "difference",
+        "between",
+        "explain",
+        "please",
+    }
+    q_tokens = [t for t in re.findall(r"[a-z0-9_+-]{2,}", q) if t not in stop]
+    if not q_tokens:
+        return chunks[:limit]
+
+    def score(chunk: dict) -> tuple[int, int]:
+        blob = _chunk_text_blob(chunk).lower()
+        matches = sum(1 for t in q_tokens if t in blob)
+        return (matches, len(blob))
+
+    return sorted(chunks, key=score, reverse=True)[:limit]
 
 
 def chunks_look_relevant(query: str, chunks: list[dict]) -> bool:
@@ -783,7 +896,8 @@ def chunks_look_relevant(query: str, chunks: list[dict]) -> bool:
 
 def llm_general_answer(query: str) -> dict | None:
     """Optional: general LLM answer when query isn't answered by video evidence."""
-    if not _openrouter_client:
+    providers = _answer_models()
+    if not providers:
         return None
     q = (query or "").strip()
     if not q:
@@ -798,9 +912,9 @@ def llm_general_answer(query: str) -> dict | None:
             "Return JSON with keys: text (plain text) and html (simple HTML using <p>, <strong>, <ul>, <li>, <hr>)."
         )
         last_err: Exception | None = None
-        for model in _openrouter_models():
+        for client, model in providers:
             try:
-                resp = _openrouter_client.chat.completions.create(
+                resp = client.chat.completions.create(
                     model=model,
                     messages=[{"role": "system", "content": system}, {"role": "user", "content": q}],
                     temperature=0.2,
@@ -810,7 +924,7 @@ def llm_general_answer(query: str) -> dict | None:
                     continue
                 import json as _json
                 try:
-                    parsed = _json.loads(content)
+                    parsed = _json.loads(_strip_markdown_json(content))
                     if isinstance(parsed, dict) and isinstance(parsed.get("text"), str):
                         html = parsed.get("html")
                         out = {"text": parsed["text"], "html": html if isinstance(html, str) else ""}
@@ -824,8 +938,14 @@ def llm_general_answer(query: str) -> dict | None:
             except Exception as e:
                 last_err = e
                 if _is_rate_limit_error(e):
+                    time.sleep(1)  # brief backoff before trying next provider
                     continue
                 break
+        # Final fallback: phi-3 HTTP endpoint with plain-text reply.
+        phi_ans = _phi3_fallback_answer(q)
+        if phi_ans:
+            _cache_put(cache_key, phi_ans)
+            return phi_ans
         if last_err:
             raise last_err
         return None

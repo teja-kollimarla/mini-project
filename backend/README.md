@@ -49,7 +49,7 @@ uv sync
 
 ### Configure environment variables
 
-Copy `.env.example` to `.env` and set: `RAGIE_API_KEY` (required), `OPENROUTER_API_KEY` (for agent), and optionally `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` for Cloudinary video storage.
+Copy `.env.example` to `.env` and set: `RAGIE_API_KEY` (required), `GEMINI_API_KEY` (recommended for answer generation), `OPENAI_API_KEY` (fallback for answer generation), `OPENROUTER_API_KEY` (for the agent or fallback), and optionally `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` for Cloudinary video storage.
 
 ## Running the application
 
@@ -91,6 +91,10 @@ In the JSON file, add this:
             ],
             "env": {
                 "RAGIE_API_KEY": "YOUR_RAGIE_API_KEY",
+                "GEMINI_API_KEY": "YOUR_GEMINI_API_KEY",
+                "GEMINI_MODEL": "gemini-2.0-flash",
+                "OPENAI_API_KEY": "YOUR_OPENAI_API_KEY",
+                "OPENAI_MODEL": "gpt-4o-mini",
                 "OPENROUTER_API_KEY": "YOUR_OPENROUTER_API_KEY"
             }
         }

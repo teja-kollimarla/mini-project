@@ -57,7 +57,6 @@ from main import (
     ingest_data_from_urls,
     chunks_look_relevant,
     llm_answer_from_chunks,
-    llm_general_answer,
     recover_video_to_cloudinary,
     retrieve_data,
     upload_directory_to_cloudinary,
@@ -399,11 +398,8 @@ def retrieve(
         relevant = bool(chunks and chunks_look_relevant(body.query, chunks))
         if relevant:
             answer = llm_answer_from_chunks(body.query, chunks)
-        if not answer:
-            # If chunks are irrelevant (or none), optionally answer generally via LLM
-            answer = llm_general_answer(body.query)
-        # If chunks are not relevant and we couldn't answer generally, avoid returning misleading chunks
-        if (not relevant) and not answer:
+        # If chunks are not relevant, avoid returning misleading chunks or a generic answer.
+        if not relevant:
             return RetrieveResponse(
                 success=True,
                 chunks=[],
@@ -413,10 +409,10 @@ def retrieve(
             )
         return RetrieveResponse(
             success=True,
-            chunks=chunks if relevant else [],
+            chunks=chunks,
             answer_text=answer.get("text") if isinstance(answer, dict) else None,
             answer_html=answer.get("html") if isinstance(answer, dict) else None,
-            message=None if relevant else "No relevant segments found in your videos for that question.",
+            message=None,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

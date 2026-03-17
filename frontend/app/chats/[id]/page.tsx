@@ -82,38 +82,123 @@ type RetrieveChunk = {
   audio_transcript?: string
 }
 
-/** Build a readable chat reply from RAG chunks (no raw JSON). */
-function buildChatReplyFromChunks(chunks: RetrieveChunk[]): string {
+const STOP_WORDS = new Set([
+  'the',
+  'and',
+  'for',
+  'with',
+  'from',
+  'this',
+  'that',
+  'what',
+  'why',
+  'how',
+  'can',
+  'you',
+  'me',
+  'tell',
+  'difference',
+  'between',
+  'explain',
+  'please',
+  'about',
+  'into',
+  'like',
+  'video',
+  'segment',
+  'segments',
+])
+
+function getChunkContent(chunk: RetrieveChunk): string {
+  let content =
+    chunk.display_text ||
+    (chunk.audio_transcript && chunk.audio_transcript.length > 700 ? chunk.audio_transcript.slice(0, 700) + '...' : chunk.audio_transcript) ||
+    chunk.video_description ||
+    (chunk.text && !chunk.text.trim().startsWith('{') ? chunk.text : '')
+
+  if (!content.trim() && chunk.text?.trim().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(chunk.text) as { video_description?: string; audio_transcript?: string }
+      content = (parsed.audio_transcript || parsed.video_description || '').slice(0, 800)
+    } catch {
+      content = chunk.text.slice(0, 600) + (chunk.text.length > 600 ? '...' : '')
+    }
+  }
+
+  return content.trim()
+}
+
+function normalizeTokens(text: string): string[] {
+  return (text || '')
+    .toLowerCase()
+    .match(/[a-z0-9_+-]{2,}/g)
+    ?.filter((t) => !STOP_WORDS.has(t)) || []
+}
+
+function splitSentences(text: string): string[] {
+  return (text || '')
+    .replace(/\s+/g, ' ')
+    .split(/(?<=[.!?])\s+|\n+/g)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+function sentenceScore(sentence: string, queryTokens: string[]): number {
+  const s = sentence.toLowerCase()
+  let score = 0
+
+  for (const token of queryTokens) {
+    if (s.includes(token)) score += 3
+  }
+
+  if (/\b(is|are|means|refers to|involves|specifies|revolves around|focuses on|contains|uses|developed to)\b/i.test(sentence)) {
+    score += 4
+  }
+
+  if (/\b(whiteboard|screen|camera|shirt|glasses|background|corner|presenter|man|woman|audio|video|visual|desk lamp|lighting|chair)\b/i.test(sentence)) {
+    score -= 8
+  }
+
+  return score
+}
+
+/** Build a concise explanatory reply from RAG chunks. */
+function buildChatReplyFromChunks(query: string, chunks: RetrieveChunk[]): string {
+  const queryTokens = normalizeTokens(query)
   const parts: string[] = []
   const seen = new Set<string>()
   for (const c of chunks) {
-    let content =
-      c.display_text ||
-      c.video_description ||
-      (c.audio_transcript && c.audio_transcript.length > 500 ? c.audio_transcript.slice(0, 500) + '...' : c.audio_transcript) ||
-      (c.text && !c.text.trim().startsWith('{') ? c.text : '')
-    // If still empty, chunk.text might be the JSON blob — parse it
-    if (!content.trim() && c.text?.trim().startsWith('{')) {
-      try {
-        const parsed = JSON.parse(c.text) as { video_description?: string; audio_transcript?: string }
-        content = (parsed.video_description || parsed.audio_transcript || '').slice(0, 800)
-        if ((parsed.audio_transcript?.length ?? 0) > 800) content += '...'
-      } catch {
-        content = c.text.slice(0, 600) + (c.text.length > 600 ? '...' : '')
-      }
+    const content = getChunkContent(c)
+    if (!content) continue
+
+    const sentences = splitSentences(content)
+    const scored = sentences
+      .map((sentence) => ({ sentence, score: sentenceScore(sentence, queryTokens) }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)
+
+    const chosen =
+      scored.slice(0, 2).map((item) => item.sentence) ||
+      sentences.slice(0, 2)
+
+    const explanation = chosen.join(' ')
+    if (!explanation.trim()) continue
+    if (/\b(whiteboard|screen|camera|shirt|glasses|background|corner|presenter|man|woman|audio|video|visual|desk lamp|lighting|chair)\b/i.test(explanation) && !/\b(is|are|means|refers to|involves|specifies|revolves around|focuses on|contains|uses|developed to)\b/i.test(explanation)) {
+      continue
     }
-    if (!content.trim()) continue
+
     const timeRange =
       c.start_time != null && c.end_time != null
         ? ` (${Math.floor(c.start_time)}s–${Math.floor(c.end_time)}s)`
         : ''
-    const key = `${c.document_name}:${content.slice(0, 100)}`
+
+    const key = `${c.document_name}:${explanation.slice(0, 120)}`
     if (seen.has(key)) continue
     seen.add(key)
-    parts.push(`**From ${c.document_name}**${timeRange}:\n\n${content.trim()}`)
+    parts.push(`**From ${c.document_name}**${timeRange}:\n\n${explanation.trim()}`)
   }
   if (parts.length === 0) return 'No matching segments found in your videos.'
-  return parts.join('\n\n---\n\n')
+  return parts.slice(0, 2).join('\n\n---\n\n')
 }
 
 function escapeHtml(s: string): string {
@@ -203,7 +288,7 @@ export default function ChatPage() {
       const reply =
         (res.answer_text && res.answer_text.trim()) ||
         (res.message && res.message.trim()) ||
-        (res.chunks?.length ? buildChatReplyFromChunks(res.chunks) : 'No matching segments found in your videos.')
+        (res.chunks?.length ? buildChatReplyFromChunks(content, res.chunks) : 'No matching segments found in your videos.')
       const replyHtml = (res.answer_html && res.answer_html.trim()) ? res.answer_html : buildChatReplyHtmlFromText(reply)
       const chunk_refs = (res.chunks ?? [])
         .filter((c) => c.start_time != null && c.end_time != null)

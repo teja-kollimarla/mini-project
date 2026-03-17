@@ -210,11 +210,11 @@ def clear_index(user_id: str | None = None):
     while True:
         try:
             kwargs = {"cursor": next_cursor} if next_cursor else {}
-            if partition:
-                kwargs["partition"] = partition
+            # Ragie SDK list() does not accept partition (API uses header); we filter by partition after listing
             response = ragie.documents.list(**kwargs)
             documents = response.result.documents
-
+            if partition:
+                documents = [d for d in documents if getattr(d, "partition", None) == partition]
             for document in documents:
                 try:
                     ragie.documents.delete(document_id=document.id)

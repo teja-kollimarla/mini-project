@@ -189,6 +189,7 @@ export async function retrieve(query: string) {
     }>
     answer_text?: string | null
     answer_html?: string | null
+    message?: string | null
   }>(res)
 }
 

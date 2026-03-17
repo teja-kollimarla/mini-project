@@ -640,6 +640,92 @@ def llm_answer_from_chunks(query: str, chunks: list[dict]) -> dict | None:
         logger.warning("LLM answer synthesis failed: %s", e)
         return None
 
+
+def _chunk_text_blob(c: dict) -> str:
+    return (
+        str(c.get("display_text") or "")
+        + " "
+        + str(c.get("video_description") or "")
+        + " "
+        + str(c.get("audio_transcript") or "")
+        + " "
+        + str(c.get("text") or "")
+    ).strip()
+
+
+def chunks_look_relevant(query: str, chunks: list[dict]) -> bool:
+    """
+    Heuristic: require some keyword overlap between query and retrieved chunks.
+    Prevents unrelated video descriptions from being treated as an answer.
+    """
+    q = (query or "").lower()
+    if not q or not chunks:
+        return False
+    # Tokenize: keep short technical tokens like npm/npx
+    stop = {
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "this",
+        "that",
+        "what",
+        "why",
+        "how",
+        "can",
+        "you",
+        "me",
+        "tell",
+        "difference",
+        "between",
+        "explain",
+        "please",
+    }
+    q_tokens = {t for t in re.findall(r"[a-z0-9_+-]{2,}", q) if t not in stop}
+    if not q_tokens:
+        return True
+    blob = " ".join(_chunk_text_blob(c).lower() for c in chunks[:8])
+    # "Strong" tokens: short technical terms (npm/npx), anything with digits, or tokens with '+'/'-'/'_'
+    strong = {t for t in q_tokens if len(t) <= 4 or any(ch.isdigit() for ch in t) or any(ch in t for ch in "+-_")}
+    if strong:
+        return any(t in blob for t in strong)
+    return any(t in blob for t in q_tokens)
+
+
+def llm_general_answer(query: str) -> dict | None:
+    """Optional: general LLM answer when query isn't answered by video evidence."""
+    if not _openrouter_client:
+        return None
+    q = (query or "").strip()
+    if not q:
+        return None
+    try:
+        system = (
+            "You are a helpful assistant.\n"
+            "Return JSON with keys: text (plain text) and html (simple HTML using <p>, <strong>, <ul>, <li>, <hr>)."
+        )
+        resp = _openrouter_client.chat.completions.create(
+            model=_openrouter_model,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": q}],
+            temperature=0.2,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        if not content:
+            return None
+        import json as _json
+        try:
+            parsed = _json.loads(content)
+            if isinstance(parsed, dict) and isinstance(parsed.get("text"), str):
+                html = parsed.get("html")
+                return {"text": parsed["text"], "html": html if isinstance(html, str) else ""}
+        except Exception:
+            pass
+        return {"text": content, "html": ""}
+    except Exception as e:
+        logger.warning("General LLM answer failed: %s", e)
+        return None
+
 # Base dir for videos and video_chunks (backend folder), so paths work regardless of process cwd
 _BACKEND_DIR = Path(__file__).resolve().parent
 

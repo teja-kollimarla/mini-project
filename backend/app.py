@@ -55,7 +55,9 @@ from main import (
     download_youtube,
     ingest_data,
     ingest_data_from_urls,
+    chunks_look_relevant,
     llm_answer_from_chunks,
+    llm_general_answer,
     recover_video_to_cloudinary,
     retrieve_data,
     upload_directory_to_cloudinary,
@@ -393,12 +395,28 @@ def retrieve(
     """MCP: retrieve_data_tool. Query the Ragie index for this user; returns chunks with text, document_name, start_time, end_time."""
     try:
         chunks = retrieve_data(body.query, user_id=user_id)
-        answer = llm_answer_from_chunks(body.query, chunks) if chunks else None
+        answer = None
+        relevant = bool(chunks and chunks_look_relevant(body.query, chunks))
+        if relevant:
+            answer = llm_answer_from_chunks(body.query, chunks)
+        if not answer:
+            # If chunks are irrelevant (or none), optionally answer generally via LLM
+            answer = llm_general_answer(body.query)
+        # If chunks are not relevant and we couldn't answer generally, avoid returning misleading chunks
+        if (not relevant) and not answer:
+            return RetrieveResponse(
+                success=True,
+                chunks=[],
+                answer_text=None,
+                answer_html=None,
+                message="No relevant segments found in your videos for that question.",
+            )
         return RetrieveResponse(
             success=True,
-            chunks=chunks,
+            chunks=chunks if relevant else [],
             answer_text=answer.get("text") if isinstance(answer, dict) else None,
             answer_html=answer.get("html") if isinstance(answer, dict) else None,
+            message=None if relevant else "No relevant segments found in your videos for that question.",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

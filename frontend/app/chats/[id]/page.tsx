@@ -274,6 +274,7 @@ export default function ChatPage() {
       const res = await retrieve(content)
       const reply =
         (res.answer_text && res.answer_text.trim()) ||
+        (res.message && res.message.trim()) ||
         (res.chunks?.length ? buildChatReplyFromChunks(res.chunks) : 'No matching segments found in your videos.')
       const replyHtml = (res.answer_html && res.answer_html.trim()) ? res.answer_html : buildChatReplyHtmlFromText(reply)
       const chunk_refs = (res.chunks ?? [])

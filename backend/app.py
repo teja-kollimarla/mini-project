@@ -270,7 +270,7 @@ def ingest_youtube(
                 status_code=503,
                 detail="FFmpeg is required for YouTube download but is not installed. Install FFmpeg and add it to your PATH: https://ffmpeg.org/download.html (Windows: choco install ffmpeg, or download from https://www.gyan.dev/ffmpeg/builds/)",
             )
-        if "sign in" in err_msg.lower() or "not a bot" in err_msg.lower() or "cookies" in err_msg.lower():
+        if "sign in" in err_msg.lower() or "not a bot" in err_msg.lower() or "cookies" in err_msg.lower() or "bot detection" in err_msg.lower() or "confirm" in err_msg.lower():
             raise HTTPException(
                 status_code=503,
                 detail="YouTube is asking to sign in / confirm you're not a bot. Set YT_DLP_COOKIES_FILE in backend .env to the path of a cookies.txt file (export from your browser when logged into YouTube).",

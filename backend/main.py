@@ -444,12 +444,26 @@ def _download_one_video(
         **_yt_dlp_youtube_opts(),
     }
     existing = set(f.name for f in output_path.iterdir() if f.is_file())
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([url])
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            rc = ydl.download([url])
+            if rc != 0:
+                logger.error("yt-dlp returned non-zero exit code %s for %s", rc, url)
+    except Exception as e:
+        err = str(e).lower()
+        if "sign in" in err or "not a bot" in err or "cookies" in err or "confirm" in err:
+            raise RuntimeError(
+                f"YouTube is blocking this request (bot detection). "
+                f"Set YT_DLP_COOKIES_FILE to a cookies.txt exported from your browser. "
+                f"Original error: {e}"
+            ) from e
+        raise
     new_files = []
     for f in output_path.iterdir():
         if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS and f.name not in existing:
             new_files.append(f.name)
+    if not new_files:
+        logger.warning("yt-dlp completed but no new video files found in %s for URL %s", output_path, url)
     cloud_folder = f"users/{user_id}/videos" if user_id else "videos"
     result = [(name, cloud_folder) for name in new_files]
     return result
@@ -473,6 +487,7 @@ def download_youtube(
         return []
     max_workers = min(4, max(1, len(urls)))
     all_results = []
+    errors = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(_download_one_video, u, output_path, user_id): u
@@ -483,7 +498,12 @@ def download_youtube(
                 for item in future.result():
                     all_results.append(item)
             except Exception as e:
-                logger.warning("Download failed for %s: %s", futures[future], e)
+                failed_url = futures[future]
+                logger.error("Download failed for %s: %s", failed_url, e)
+                errors.append(str(e))
+    # If every download failed, raise so the caller gets the real error message
+    if not all_results and errors:
+        raise RuntimeError("; ".join(errors))
     # Cloudinary upload only the files that were downloaded in this run (all_results).
     if _cloudinary_configured():
         seen = set()

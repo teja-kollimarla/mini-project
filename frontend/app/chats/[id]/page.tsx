@@ -2,7 +2,6 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { useParams } from 'next/navigation'
-import dynamic from 'next/dynamic'
 import { motion } from 'framer-motion'
 import { Send, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -10,8 +9,7 @@ import { DashboardLayout } from '@/components/dashboard-layout'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { getChat, addChatMessage, retrieve, createChunk, clipPlayUrl, updateChat } from '@/lib/api'
 import DOMPurify from 'dompurify'
-
-const ReactQuill = dynamic(() => import('react-quill'), { ssr: false })
+import type QuillNamespace from 'quill'
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -40,16 +38,19 @@ interface Message {
   created_at: string
 }
 
-/** Assistant message can store rich content: { text, chunk_refs } for "Watch segment" links */
+/** Assistant message can store rich content: { text/html, chunk_refs } for "Watch segment" links */
 interface AssistantContent {
-  text: string
+  text?: string
+  html?: string
   chunk_refs?: Array< { document_name: string; start_time: number; end_time: number } >
 }
 
-function parseAssistantContent(content: string): { text: string; chunk_refs?: AssistantContent['chunk_refs'] } | null {
+function parseAssistantContent(
+  content: string,
+): { text?: string; html?: string; chunk_refs?: AssistantContent['chunk_refs'] } | null {
   try {
     const parsed = JSON.parse(content) as AssistantContent
-    if (typeof parsed?.text === 'string') return parsed
+    if (typeof parsed?.html === 'string' || typeof parsed?.text === 'string') return parsed
   } catch {
     /* plain text */
   }
@@ -68,6 +69,72 @@ function stripHtmlToText(html: string): string {
 function isProbablyHtml(s: string): boolean {
   const t = (s || '').trim()
   return t.startsWith('<') && t.includes('>')
+}
+
+function useQuillEditor(opts: {
+  value: string
+  onChange: (html: string) => void
+  readOnly: boolean
+}) {
+  const { value, onChange, readOnly } = opts
+  const hostRef = useRef<HTMLDivElement>(null)
+  const quillRef = useRef<any>(null)
+  const lastHtmlRef = useRef<string>('')
+
+  useEffect(() => {
+    let mounted = true
+    ;(async () => {
+      const mod = (await import('quill')) as unknown as { default: typeof QuillNamespace }
+      const Quill = mod.default
+      if (!mounted) return
+      if (!hostRef.current) return
+      if (quillRef.current) return
+      const q = new Quill(hostRef.current, {
+        theme: 'snow',
+        placeholder: 'Message…',
+        modules: {
+          toolbar: [[{ header: [false, 2, 3] }], ['bold', 'italic', 'underline'], [{ list: 'ordered' }, { list: 'bullet' }], ['clean']],
+        },
+      })
+      q.enable(!readOnly)
+      quillRef.current = q
+
+      q.on('text-change', () => {
+        const html = (hostRef.current?.querySelector('.ql-editor') as HTMLElement | null)?.innerHTML ?? ''
+        lastHtmlRef.current = html
+        onChange(html)
+      })
+
+      // init value
+      const editor = hostRef.current?.querySelector('.ql-editor') as HTMLElement | null
+      if (editor) {
+        editor.innerHTML = value || ''
+        lastHtmlRef.current = value || ''
+      }
+    })()
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  useEffect(() => {
+    const q = quillRef.current
+    if (!q) return
+    q.enable(!readOnly)
+  }, [readOnly])
+
+  // External value updates (e.g. when we clear after send)
+  useEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+    const editor = host.querySelector('.ql-editor') as HTMLElement | null
+    if (!editor) return
+    if ((value || '') === (lastHtmlRef.current || '')) return
+    editor.innerHTML = value || ''
+    lastHtmlRef.current = value || ''
+  }, [value])
+
+  return hostRef
 }
 
 type RetrieveChunk = {
@@ -114,6 +181,29 @@ function buildChatReplyFromChunks(chunks: RetrieveChunk[]): string {
   return parts.join('\n\n---\n\n')
 }
 
+function escapeHtml(s: string): string {
+  return (s || '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
+/** Basic HTML version (bold headers + hr separators) for rich assistant rendering. */
+function buildChatReplyHtmlFromText(text: string): string {
+  const safe = escapeHtml(text || '')
+  // **From X** -> <strong>From X</strong>
+  const withBold = safe.replaceAll(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  const blocks = withBold.split(/\n{2,}/g).map((b) => b.trim()).filter(Boolean)
+  const out: string[] = []
+  for (const b of blocks) {
+    if (b === '---') out.push('<hr />')
+    else out.push(`<p>${b.replaceAll('\n', '<br />')}</p>`)
+  }
+  return out.join('')
+}
+
 export default function ChatPage() {
   const params = useParams()
   const chatId = params?.id as string
@@ -123,6 +213,7 @@ export default function ChatPage() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [clippingSegment, setClippingSegment] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const quillHostRef = useQuillEditor({ value: inputValue, onChange: setInputValue, readOnly: isLoading })
 
   const handleWatchSegment = async (doc: string, start: number, end: number) => {
     const key = `${doc}:${start}-${end}`
@@ -179,6 +270,7 @@ export default function ChatPage() {
       const reply = res.chunks?.length
         ? buildChatReplyFromChunks(res.chunks)
         : 'No matching segments found in your videos.'
+      const replyHtml = buildChatReplyHtmlFromText(reply)
       const chunk_refs = (res.chunks ?? [])
         .filter((c) => c.start_time != null && c.end_time != null)
         .map((c) => ({
@@ -188,8 +280,8 @@ export default function ChatPage() {
         }))
       const assistantContent =
         chunk_refs.length > 0
-          ? JSON.stringify({ text: reply, chunk_refs })
-          : reply
+          ? JSON.stringify({ text: reply, html: replyHtml, chunk_refs })
+          : JSON.stringify({ text: reply, html: replyHtml })
       await addChatMessage(chatId, 'assistant', assistantContent)
       const updated = await getChat(chatId)
       setChat((prev) => (prev ? { ...prev, messages: updated.messages as Message[] } : null))
@@ -275,10 +367,18 @@ export default function ChatPage() {
                 {message.role === 'assistant' ? (() => {
                   const parsed = parseAssistantContent(message.content)
                   const displayText = parsed?.text ?? message.content
+                  const displayHtml = parsed?.html
                   const refs = parsed?.chunk_refs ?? []
                   return (
                     <>
-                      <p className="text-sm leading-relaxed whitespace-pre-wrap">{displayText}</p>
+                      {displayHtml ? (
+                        <div
+                          className="text-sm leading-relaxed prose max-w-none"
+                          dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(displayHtml) }}
+                        />
+                      ) : (
+                        <p className="text-sm leading-relaxed whitespace-pre-wrap">{displayText}</p>
+                      )}
                       {refs.length > 0 && (
                         <div className="mt-3 pt-3 border-t border-border/50 space-y-2">
                           <p className="text-xs font-medium text-muted-foreground">Watch segments:</p>
@@ -374,16 +474,7 @@ export default function ChatPage() {
         >
           <div className="flex gap-2 items-end">
             <div className="flex-1">
-              <ReactQuill
-                theme="snow"
-                value={inputValue}
-                onChange={setInputValue}
-                readOnly={isLoading}
-                placeholder="Message…"
-                modules={{
-                  toolbar: [[{ header: [false, 2, 3] }], ['bold', 'italic', 'underline'], [{ list: 'ordered' }, { list: 'bullet' }], ['clean']],
-                }}
-              />
+              <div ref={quillHostRef} />
             </div>
             <Button type="submit" disabled={!inputValue.trim() || isLoading} size="icon">
               {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}

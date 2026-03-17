@@ -132,10 +132,16 @@ def _is_rate_limit_error(e: Exception) -> bool:
     s = str(e).lower()
     return "rate limit" in s or "error code: 429" in s or "'code': 429" in s
 
-# initialize ragie client
-ragie = Ragie(
-    auth=os.getenv('RAGIE_API_KEY'),
-)
+_ragie_key = os.getenv("RAGIE_API_KEY", "").strip()
+ragie: Ragie | None = None
+if _ragie_key:
+    ragie = Ragie(auth=_ragie_key)
+
+
+def _require_ragie() -> Ragie:
+    if ragie is None:
+        raise RuntimeError("RAGIE_API_KEY is not set. Set it in environment variables to use ingest/retrieve.")
+    return ragie
 
 
 # Cloudinary (optional): set CLOUDINARY_URL or CLOUDINARY_CLOUD_NAME + API_KEY + API_SECRET
@@ -271,19 +277,20 @@ def upload_directory_to_cloudinary(directory_path: Path, folder: str) -> list[tu
 
 # Remove previous docs from index (optionally scoped to user_id via partition)
 def clear_index(user_id: str | None = None):
+    rag = _require_ragie()
     partition = _partition_for_user(user_id) if user_id else None
     next_cursor = None
     while True:
         try:
             kwargs = {"cursor": next_cursor} if next_cursor else {}
             # Ragie SDK list() does not accept partition (API uses header); we filter by partition after listing
-            response = ragie.documents.list(**kwargs)
+            response = rag.documents.list(**kwargs)
             documents = response.result.documents
             if partition:
                 documents = [d for d in documents if getattr(d, "partition", None) == partition]
             for document in documents:
                 try:
-                    ragie.documents.delete(document_id=document.id)
+                    rag.documents.delete(document_id=document.id)
                     logger.info(f"Deleted document {document.id}")
                 except Exception as e:
                     logger.error(f"Failed to delete document {document.id}: {str(e)}")
@@ -536,6 +543,7 @@ def ingest_data_from_urls(
     user_id: str | None = None,
 ) -> list[tuple[str, str]]:
     """Ingest videos into Ragie from public URLs. Returns list of (file_name, status)."""
+    _ = _require_ragie()
     statuses: list[tuple[str, str]] = []
     if not url_file_pairs:
         return statuses
@@ -556,6 +564,7 @@ def ingest_data_from_urls(
 # Ingest data from a directory into the Ragie index (optionally scoped to user_id)
 def ingest_data(directory, extensions: set | None = None, user_id: str | None = None, only_files: list[str] | None = None):
     """Ingest video/files from directory. If only_files is set, ingest just those filenames (avoids re-ingesting whole dir)."""
+    _ = _require_ragie()
     directory_path = Path(directory)
     files = os.listdir(directory_path)
     if extensions is not None:
@@ -595,11 +604,12 @@ def ingest_data(directory, extensions: set | None = None, user_id: str | None = 
 # Retrieve data from the Ragie index (optionally scoped to user_id via partition)
 def retrieve_data(query, user_id: str | None = None):
     try:
+        rag = _require_ragie()
         logger.info(f"Retrieving data for query: {query}")
         request = {"query": query}
         if user_id:
             request["partition"] = _partition_for_user(user_id)
-        retrieval_response = ragie.retrievals.retrieve(request=request)
+        retrieval_response = rag.retrievals.retrieve(request=request)
 
         import json as _json
         content = []

@@ -12,10 +12,21 @@ import cloudinary.uploader
 import httpx
 from ragie import Ragie
 from moviepy import VideoFileClip
+from moviepy.config import change_settings
 import yt_dlp
 from openai import OpenAI
 
 load_dotenv()
+
+# FFmpeg: allow cross-platform configuration.
+# - Windows local dev: set FFMPEG_LOCATION to full path of ffmpeg.exe
+# - Railway/Linux: install ffmpeg via apt and omit FFMPEG_LOCATION; we default to "ffmpeg"
+_ffmpeg_exe = os.getenv("FFMPEG_LOCATION", "").strip() or "ffmpeg"
+try:
+    change_settings({"FFMPEG_BINARY": _ffmpeg_exe})
+except Exception:
+    # Non-fatal: MoviePy will still try to resolve ffmpeg from PATH
+    pass
 
 # Cloudinary: configure once at startup (CLOUDINARY_URL or cloud_name + api_key + api_secret)
 _cloudinary_url = os.getenv("CLOUDINARY_URL", "").strip()
@@ -70,9 +81,52 @@ logger = logging.getLogger(__name__)
 # OpenRouter (optional) for LLM answers from retrieved chunks
 _openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
 _openrouter_model = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free").strip()
+_openrouter_fallback_models = [
+    m.strip()
+    for m in os.getenv("OPENROUTER_FALLBACK_MODELS", "").split(",")
+    if m.strip()
+]
 _openrouter_client: OpenAI | None = None
 if _openrouter_key:
     _openrouter_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=_openrouter_key)
+
+# Simple in-memory cache to reduce OpenRouter calls (helps avoid 429 RPM limits)
+_llm_cache: dict[str, tuple[float, dict]] = {}
+_llm_cache_ttl_s = float(os.getenv("LLM_CACHE_TTL_SECONDS", "600").strip() or "600")
+
+
+def _cache_get(key: str) -> dict | None:
+    try:
+        item = _llm_cache.get(key)
+        if not item:
+            return None
+        ts, val = item
+        if time.time() - ts > _llm_cache_ttl_s:
+            _llm_cache.pop(key, None)
+            return None
+        return val
+    except Exception:
+        return None
+
+
+def _cache_put(key: str, val: dict) -> None:
+    try:
+        _llm_cache[key] = (time.time(), val)
+    except Exception:
+        return None
+
+
+def _openrouter_models() -> list[str]:
+    out = [_openrouter_model]
+    for m in _openrouter_fallback_models:
+        if m and m not in out:
+            out.append(m)
+    return out
+
+
+def _is_rate_limit_error(e: Exception) -> bool:
+    s = str(e).lower()
+    return "rate limit" in s or "error code: 429" in s or "'code': 429" in s
 
 # initialize ragie client
 ragie = Ragie(
@@ -618,24 +672,44 @@ def llm_answer_from_chunks(query: str, chunks: list[dict]) -> dict | None:
             "Return your response as JSON with keys: text (plain text) and html (simple HTML using <p>, <strong>, <ul>, <li>, <hr>)."
         )
         user = f"Question: {query}\n\nEvidence snippets:\n" + "\n".join(ctx_lines)
-        resp = _openrouter_client.chat.completions.create(
-            model=_openrouter_model,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            temperature=0.2,
-        )
-        content = (resp.choices[0].message.content or "").strip()
-        if not content:
-            return None
-        import json as _json
-        try:
-            parsed = _json.loads(content)
-            if isinstance(parsed, dict) and isinstance(parsed.get("text"), str):
-                html = parsed.get("html")
-                return {"text": parsed["text"], "html": html if isinstance(html, str) else ""}
-        except Exception:
-            pass
-        # Fallback if model didn't return JSON
-        return {"text": content, "html": ""}
+        cache_key = "chunks:" + str(hash((query, "\n".join(ctx_lines))))
+        cached = _cache_get(cache_key)
+        if cached:
+            return cached
+
+        last_err: Exception | None = None
+        for model in _openrouter_models():
+            try:
+                resp = _openrouter_client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                    temperature=0.2,
+                )
+                content = (resp.choices[0].message.content or "").strip()
+                if not content:
+                    continue
+                import json as _json
+                try:
+                    parsed = _json.loads(content)
+                    if isinstance(parsed, dict) and isinstance(parsed.get("text"), str):
+                        html = parsed.get("html")
+                        out = {"text": parsed["text"], "html": html if isinstance(html, str) else ""}
+                        _cache_put(cache_key, out)
+                        return out
+                except Exception:
+                    pass
+                out = {"text": content, "html": ""}
+                _cache_put(cache_key, out)
+                return out
+            except Exception as e:
+                last_err = e
+                # On rate-limit, try fallbacks (if configured); otherwise bail quickly
+                if _is_rate_limit_error(e):
+                    continue
+                break
+        if last_err:
+            raise last_err
+        return None
     except Exception as e:
         logger.warning("LLM answer synthesis failed: %s", e)
         return None
@@ -701,27 +775,46 @@ def llm_general_answer(query: str) -> dict | None:
     if not q:
         return None
     try:
+        cache_key = "general:" + str(hash(q))
+        cached = _cache_get(cache_key)
+        if cached:
+            return cached
         system = (
             "You are a helpful assistant.\n"
             "Return JSON with keys: text (plain text) and html (simple HTML using <p>, <strong>, <ul>, <li>, <hr>)."
         )
-        resp = _openrouter_client.chat.completions.create(
-            model=_openrouter_model,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": q}],
-            temperature=0.2,
-        )
-        content = (resp.choices[0].message.content or "").strip()
-        if not content:
-            return None
-        import json as _json
-        try:
-            parsed = _json.loads(content)
-            if isinstance(parsed, dict) and isinstance(parsed.get("text"), str):
-                html = parsed.get("html")
-                return {"text": parsed["text"], "html": html if isinstance(html, str) else ""}
-        except Exception:
-            pass
-        return {"text": content, "html": ""}
+        last_err: Exception | None = None
+        for model in _openrouter_models():
+            try:
+                resp = _openrouter_client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "system", "content": system}, {"role": "user", "content": q}],
+                    temperature=0.2,
+                )
+                content = (resp.choices[0].message.content or "").strip()
+                if not content:
+                    continue
+                import json as _json
+                try:
+                    parsed = _json.loads(content)
+                    if isinstance(parsed, dict) and isinstance(parsed.get("text"), str):
+                        html = parsed.get("html")
+                        out = {"text": parsed["text"], "html": html if isinstance(html, str) else ""}
+                        _cache_put(cache_key, out)
+                        return out
+                except Exception:
+                    pass
+                out = {"text": content, "html": ""}
+                _cache_put(cache_key, out)
+                return out
+            except Exception as e:
+                last_err = e
+                if _is_rate_limit_error(e):
+                    continue
+                break
+        if last_err:
+            raise last_err
+        return None
     except Exception as e:
         logger.warning("General LLM answer failed: %s", e)
         return None

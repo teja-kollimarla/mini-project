@@ -5,10 +5,8 @@ import { motion } from 'framer-motion'
 import Link from 'next/link'
 import {
   BarChart3,
-  Scissors,
   MessageCircle,
   Upload,
-  Search,
   Zap,
   Play,
   Loader2,
@@ -16,7 +14,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { DashboardLayout } from '@/components/dashboard-layout'
 import { Card } from '@/components/ui/card'
-import { listVideos, listChunks, listChats } from '@/lib/api'
+import { listVideos, listChats } from '@/lib/api'
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -50,18 +48,10 @@ const quickActions = [
   {
     title: 'Ask a Question',
     description: 'Search and chat with your video content',
-    icon: Search,
-    href: '/search',
+    icon: Zap,
+    href: '/chats',
     color: 'text-green-500',
     bgColor: 'bg-green-500/10',
-  },
-  {
-    title: 'Create Clip',
-    description: 'Generate clips from your videos instantly',
-    icon: Scissors,
-    href: '/clips',
-    color: 'text-pink-500',
-    bgColor: 'bg-pink-500/10',
   },
 ]
 
@@ -81,16 +71,14 @@ function formatRelativeTime(dateStr: string): string {
 
 export default function DashboardPage() {
   const [videos, setVideos] = useState<Array<{ id: string; filename: string; source: string; created_at: string }>>([])
-  const [chunks, setChunks] = useState<Array<{ id: string; document_name: string; filename: string; created_at: string }>>([])
   const [chats, setChats] = useState<Array<{ id: string; title: string | null; updated_at: string }>>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    Promise.all([listVideos(), listChunks(), listChats()])
-      .then(([vRes, cRes, chRes]) => {
+    Promise.all([listVideos(), listChats()])
+      .then(([vRes, chRes]) => {
         setVideos(vRes)
-        setChunks(cRes.chunks ?? [])
         setChats(chRes)
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load'))
@@ -98,11 +86,10 @@ export default function DashboardPage() {
   }, [])
 
   const videoCount = videos.length
-  const chunkCount = chunks.length
   const chatCount = chats.length
 
   type ActivityItem = {
-    type: 'video' | 'clip' | 'chat'
+    type: 'video' | 'chat'
     title: string
     subtitle: string
     timestamp: string
@@ -118,14 +105,6 @@ export default function DashboardPage() {
       href: '/videos',
       icon: Play,
     })),
-    ...chunks.slice(0, 3).map((c) => ({
-      type: 'clip' as const,
-      title: c.document_name,
-      subtitle: 'Clip',
-      timestamp: c.created_at,
-      href: '/clips',
-      icon: Scissors,
-    })),
     ...chats.slice(0, 3).map((ch) => ({
       type: 'chat' as const,
       title: ch.title || 'Chat',
@@ -140,7 +119,6 @@ export default function DashboardPage() {
 
   const statCards = [
     { label: 'Videos Indexed', value: String(videoCount), icon: BarChart3, color: 'text-blue-500', bgColor: 'bg-blue-500/10' },
-    { label: 'Clips Created', value: String(chunkCount), icon: Scissors, color: 'text-purple-500', bgColor: 'bg-purple-500/10' },
     { label: 'Chats', value: String(chatCount), icon: MessageCircle, color: 'text-cyan-500', bgColor: 'bg-cyan-500/10' },
   ]
 
@@ -172,7 +150,7 @@ export default function DashboardPage() {
           <p className="text-sm text-destructive">{error}</p>
         )}
 
-        <motion.div className="grid md:grid-cols-3 gap-6" variants={containerVariants}>
+        <motion.div className="grid md:grid-cols-2 gap-6" variants={containerVariants}>
           {statCards.map((stat, index) => {
             const Icon = stat.icon
             return (
@@ -193,7 +171,7 @@ export default function DashboardPage() {
 
         <motion.div variants={itemVariants}>
           <h2 className="text-xl font-bold mb-4">Quick Actions</h2>
-          <div className="grid md:grid-cols-3 gap-6">
+          <div className="grid md:grid-cols-2 gap-6">
             {quickActions.map((action, index) => {
               const Icon = action.icon
               return (

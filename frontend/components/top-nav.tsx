@@ -1,8 +1,7 @@
 'use client'
 
-import { Search, Command } from 'lucide-react'
+import { Command } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { ThemeToggle } from '@/components/theme-toggle'
 import {
   DropdownMenu,
@@ -18,17 +17,7 @@ export function TopNav() {
   return (
     <header className="fixed top-0 right-0 left-64 z-30 border-b border-border bg-background/80 backdrop-blur-md">
       <div className="flex items-center justify-between px-6 py-4 gap-4">
-        {/* Search */}
-        <div className="relative flex-1 max-w-md">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            placeholder="Search..."
-            className="pl-10 bg-card border-border"
-          />
-          <kbd className="absolute right-3 top-1/2 -translate-y-1/2 rounded border border-border bg-muted px-2 py-1 text-xs font-semibold text-muted-foreground">
-            ⌘K
-          </kbd>
-        </div>
+        <div className="flex-1" />
 
         {/* Actions */}
         <div className="flex items-center gap-3">

@@ -5,8 +5,6 @@ import { usePathname } from 'next/navigation'
 import { 
   Home, 
   Upload, 
-  Search, 
-  Scissors, 
   MessageCircle, 
   Film, 
   Settings,
@@ -19,8 +17,6 @@ import { Button } from '@/components/ui/button'
 const navItems = [
   { href: '/dashboard', label: 'Home', icon: Home },
   { href: '/ingest', label: 'Ingest', icon: Upload },
-  { href: '/search', label: 'Search', icon: Search },
-  { href: '/clips', label: 'Clips', icon: Scissors },
   { href: '/chats', label: 'Chats', icon: MessageCircle },
   { href: '/videos', label: 'My Videos', icon: Film },
   { href: '/settings', label: 'Settings', icon: Settings },

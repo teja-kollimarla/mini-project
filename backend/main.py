@@ -54,7 +54,14 @@ def _yt_dlp_cookie_opts() -> dict:
     browser = os.getenv("YT_DLP_COOKIES_FROM_BROWSER", "").strip().lower()
     if browser:
         opts["cookiesfrombrowser"] = (browser.split(":")[0],)
-    # 2) Exported cookies.txt — YT_DLP_COOKIES_FILE path, or default backend/cookies.txt if it exists
+    # 2) Inline cookie content via env var — write to temp file at startup (for Railway where you can't upload files)
+    cookie_content = os.getenv("YT_DLP_COOKIES_CONTENT", "").strip()
+    if cookie_content:
+        tmp_cookie_path = Path("/tmp/yt_cookies.txt")
+        tmp_cookie_path.write_text(cookie_content)
+        opts["cookiefile"] = str(tmp_cookie_path)
+        return opts
+    # 3) Exported cookies.txt file path — YT_DLP_COOKIES_FILE env, or default backend/cookies.txt if it exists
     cookiefile = os.getenv("YT_DLP_COOKIES_FILE", "").strip()
     if not cookiefile:
         default_cookies = Path(__file__).resolve().parent / "cookies.txt"

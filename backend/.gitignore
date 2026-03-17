@@ -73,5 +73,5 @@ dmypy.json
 
 # Exported browser cookies (do not commit)
 cookies.txt
-
+app/
 .python-version

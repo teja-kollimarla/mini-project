@@ -9,7 +9,7 @@ import { DashboardLayout } from '@/components/dashboard-layout'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { getChat, addChatMessage, retrieve, createChunk, clipPlayUrl, updateChat } from '@/lib/api'
 import DOMPurify from 'dompurify'
-import type QuillNamespace from 'quill'
+import { Textarea } from '@/components/ui/textarea'
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -71,83 +71,6 @@ function isProbablyHtml(s: string): boolean {
   return t.startsWith('<') && t.includes('>')
 }
 
-function useQuillEditor(opts: {
-  value: string
-  onChange: (html: string) => void
-  readOnly: boolean
-}) {
-  const { value, onChange, readOnly } = opts
-  const hostRef = useRef<HTMLDivElement>(null)
-  const quillRef = useRef<any>(null)
-  const lastHtmlRef = useRef<string>('')
-  const [ready, setReady] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let mounted = true
-    ;(async () => {
-      try {
-        const mod = (await import('quill')) as unknown as { default: typeof QuillNamespace }
-        const Quill = mod.default
-      if (!mounted) return
-      if (!hostRef.current) return
-      if (quillRef.current) return
-      const q = new Quill(hostRef.current, {
-        theme: 'snow',
-        placeholder: 'Message…',
-        modules: {
-          toolbar: [[{ header: [false, 2, 3] }], ['bold', 'italic', 'underline'], [{ list: 'ordered' }, { list: 'bullet' }], ['clean']],
-        },
-      })
-      q.enable(!readOnly)
-      quillRef.current = q
-
-      q.on('text-change', () => {
-        const html = (q.root as HTMLElement | null)?.innerHTML ?? ''
-        lastHtmlRef.current = html
-        onChange(html)
-      })
-
-      // init value
-      if (value && value.trim()) {
-        q.clipboard.dangerouslyPasteHTML(value)
-        lastHtmlRef.current = (q.root as HTMLElement).innerHTML
-      } else {
-        q.setText('')
-        lastHtmlRef.current = (q.root as HTMLElement).innerHTML
-      }
-        setReady(true)
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Editor failed to load')
-      }
-    })()
-    return () => {
-      mounted = false
-    }
-  }, [])
-
-  useEffect(() => {
-    const q = quillRef.current
-    if (!q) return
-    q.enable(!readOnly)
-  }, [readOnly])
-
-  // External value updates (e.g. when we clear after send)
-  useEffect(() => {
-    const q = quillRef.current
-    if (!q) return
-    if ((value || '') === (lastHtmlRef.current || '')) return
-    if (value && value.trim()) {
-      q.clipboard.dangerouslyPasteHTML(value)
-    } else {
-      // Important: Quill expects an empty doc to still be <p><br></p>
-      q.setText('')
-    }
-    lastHtmlRef.current = (q.root as HTMLElement | null)?.innerHTML ?? ''
-  }, [value])
-
-  return { hostRef, ready, error }
-}
 
 type RetrieveChunk = {
   text: string
@@ -225,7 +148,6 @@ export default function ChatPage() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [clippingSegment, setClippingSegment] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const quill = useQuillEditor({ value: inputValue, onChange: setInputValue, readOnly: isLoading })
 
   const handleWatchSegment = async (doc: string, start: number, end: number) => {
     const key = `${doc}:${start}-${end}`
@@ -260,8 +182,7 @@ export default function ChatPage() {
     e.preventDefault()
     if (!inputValue.trim() || !chatId || !chat) return
 
-    const html = inputValue.trim()
-    const content = stripHtmlToText(html).trim()
+    const content = inputValue.trim()
     if (!content) return
     setInputValue('')
     setIsLoading(true)
@@ -277,7 +198,7 @@ export default function ChatPage() {
           // non-fatal: chat still works even if title update fails
         }
       }
-      await addChatMessage(chatId, 'user', html)
+      await addChatMessage(chatId, 'user', content)
       const res = await retrieve(content)
       const reply =
         (res.answer_text && res.answer_text.trim()) ||
@@ -487,19 +408,19 @@ export default function ChatPage() {
         >
           <div className="flex gap-2 items-end">
             <div className="flex-1">
-              <div className="min-h-[120px]">
-                {quill.error ? (
-                  <textarea
-                    className="w-full min-h-[120px] rounded-md border border-border bg-background px-3 py-2 text-sm"
-                    placeholder="Message…"
-                    value={stripHtmlToText(inputValue)}
-                    onChange={(e) => setInputValue(e.target.value)}
-                    disabled={isLoading}
-                  />
-                ) : (
-                  <div ref={quill.hostRef} />
-                )}
-              </div>
+              <Textarea
+                placeholder="Message…"
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                disabled={isLoading}
+                className="min-h-[48px] max-h-[200px]"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault()
+                    ;(e.currentTarget.form as HTMLFormElement | null)?.requestSubmit()
+                  }
+                }}
+              />
             </div>
             <Button type="submit" disabled={!inputValue.trim() || isLoading} size="icon">
               {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}

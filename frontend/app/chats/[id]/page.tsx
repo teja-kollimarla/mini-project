@@ -80,12 +80,15 @@ function useQuillEditor(opts: {
   const hostRef = useRef<HTMLDivElement>(null)
   const quillRef = useRef<any>(null)
   const lastHtmlRef = useRef<string>('')
+  const [ready, setReady] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let mounted = true
     ;(async () => {
-      const mod = (await import('quill')) as unknown as { default: typeof QuillNamespace }
-      const Quill = mod.default
+      try {
+        const mod = (await import('quill')) as unknown as { default: typeof QuillNamespace }
+        const Quill = mod.default
       if (!mounted) return
       if (!hostRef.current) return
       if (quillRef.current) return
@@ -113,6 +116,10 @@ function useQuillEditor(opts: {
         q.setText('')
         lastHtmlRef.current = (q.root as HTMLElement).innerHTML
       }
+        setReady(true)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Editor failed to load')
+      }
     })()
     return () => {
       mounted = false
@@ -139,7 +146,7 @@ function useQuillEditor(opts: {
     lastHtmlRef.current = (q.root as HTMLElement | null)?.innerHTML ?? ''
   }, [value])
 
-  return hostRef
+  return { hostRef, ready, error }
 }
 
 type RetrieveChunk = {
@@ -218,7 +225,7 @@ export default function ChatPage() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [clippingSegment, setClippingSegment] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const quillHostRef = useQuillEditor({ value: inputValue, onChange: setInputValue, readOnly: isLoading })
+  const quill = useQuillEditor({ value: inputValue, onChange: setInputValue, readOnly: isLoading })
 
   const handleWatchSegment = async (doc: string, start: number, end: number) => {
     const key = `${doc}:${start}-${end}`
@@ -480,7 +487,19 @@ export default function ChatPage() {
         >
           <div className="flex gap-2 items-end">
             <div className="flex-1">
-              <div ref={quillHostRef} />
+              <div className="min-h-[120px]">
+                {quill.error ? (
+                  <textarea
+                    className="w-full min-h-[120px] rounded-md border border-border bg-background px-3 py-2 text-sm"
+                    placeholder="Message…"
+                    value={stripHtmlToText(inputValue)}
+                    onChange={(e) => setInputValue(e.target.value)}
+                    disabled={isLoading}
+                  />
+                ) : (
+                  <div ref={quill.hostRef} />
+                )}
+              </div>
             </div>
             <Button type="submit" disabled={!inputValue.trim() || isLoading} size="icon">
               {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}

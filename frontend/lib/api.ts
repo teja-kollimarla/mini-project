@@ -8,6 +8,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 const USER_ID_KEY = 'videobase_user_id'
 const ACCESS_TOKEN_KEY = 'videobase_access_token'
 const REFRESH_TOKEN_KEY = 'videobase_refresh_token'
+const AUTH_EVENT = 'videobase_auth_changed'
 
 function isClient() {
   return typeof window !== 'undefined'
@@ -43,6 +44,11 @@ export function setTokens(accessToken: string, refreshToken: string, externalId:
   localStorage.setItem(ACCESS_TOKEN_KEY, accessToken)
   localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken)
   setUserId(externalId)
+  try {
+    window.dispatchEvent(new Event(AUTH_EVENT))
+  } catch {
+    // ignore
+  }
 }
 
 /** Clear tokens and user id (logout). */
@@ -51,6 +57,22 @@ export function clearTokens(): void {
   localStorage.removeItem(ACCESS_TOKEN_KEY)
   localStorage.removeItem(REFRESH_TOKEN_KEY)
   localStorage.removeItem(USER_ID_KEY)
+  try {
+    window.dispatchEvent(new Event(AUTH_EVENT))
+  } catch {
+    // ignore
+  }
+}
+
+export function onAuthChanged(cb: () => void): () => void {
+  if (!isClient()) return () => {}
+  const handler = () => cb()
+  window.addEventListener(AUTH_EVENT, handler)
+  window.addEventListener('storage', handler)
+  return () => {
+    window.removeEventListener(AUTH_EVENT, handler)
+    window.removeEventListener('storage', handler)
+  }
 }
 
 /** Headers for authenticated requests: Bearer token, or X-User-Id for guest. Throws if neither. */

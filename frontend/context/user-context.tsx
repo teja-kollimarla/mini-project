@@ -1,7 +1,7 @@
 'use client'
 
 import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react'
-import { getUserId, setUserId as persistUserId } from '@/lib/api'
+import { getUserId, setUserId as persistUserId, onAuthChanged } from '@/lib/api'
 
 type UserContextType = {
   userId: string | null
@@ -18,6 +18,8 @@ export function UserProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     setUserIdState(getUserId())
     setIsReady(true)
+    const off = onAuthChanged(() => setUserIdState(getUserId()))
+    return off
   }, [])
 
   const setUserId = useCallback((id: string) => {

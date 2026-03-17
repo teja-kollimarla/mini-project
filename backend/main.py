@@ -12,7 +12,6 @@ import cloudinary.uploader
 import httpx
 from ragie import Ragie
 from moviepy import VideoFileClip
-from moviepy.config import change_settings
 import yt_dlp
 from openai import OpenAI
 
@@ -22,8 +21,13 @@ load_dotenv()
 # - Windows local dev: set FFMPEG_LOCATION to full path of ffmpeg.exe
 # - Railway/Linux: install ffmpeg via apt and omit FFMPEG_LOCATION; we default to "ffmpeg"
 _ffmpeg_exe = os.getenv("FFMPEG_LOCATION", "").strip() or "ffmpeg"
+# Use env vars (compatible across MoviePy/imageio versions)
+os.environ.setdefault("IMAGEIO_FFMPEG_EXE", _ffmpeg_exe)
 try:
-    change_settings({"FFMPEG_BINARY": _ffmpeg_exe})
+    import moviepy.config as _mp_cfg
+
+    if hasattr(_mp_cfg, "FFMPEG_BINARY"):
+        _mp_cfg.FFMPEG_BINARY = _ffmpeg_exe  # type: ignore[attr-defined]
 except Exception:
     # Non-fatal: MoviePy will still try to resolve ffmpeg from PATH
     pass

@@ -187,6 +187,8 @@ export async function retrieve(query: string) {
       video_description?: string
       audio_transcript?: string
     }>
+    answer_text?: string | null
+    answer_html?: string | null
   }>(res)
 }
 

@@ -13,6 +13,7 @@ import httpx
 from ragie import Ragie
 from moviepy import VideoFileClip
 import yt_dlp
+from openai import OpenAI
 
 load_dotenv()
 
@@ -65,6 +66,13 @@ def _partition_for_user(user_id: str) -> str:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# OpenRouter (optional) for LLM answers from retrieved chunks
+_openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+_openrouter_model = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free").strip()
+_openrouter_client: OpenAI | None = None
+if _openrouter_key:
+    _openrouter_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=_openrouter_key)
 
 # initialize ragie client
 ragie = Ragie(
@@ -575,6 +583,62 @@ def retrieve_data(query, user_id: str | None = None):
     except Exception as e:
         logger.error(f"Failed to retrieve data: {str(e)}")
         raise
+
+
+def llm_answer_from_chunks(query: str, chunks: list[dict]) -> dict | None:
+    """
+    Optional: synthesize a final answer using an LLM, grounded in retrieved Ragie chunks.
+    Returns {"text": str, "html": str} or None if not configured/failed.
+    """
+    if not _openrouter_client:
+        return None
+    try:
+        # Keep prompt bounded (avoid huge context)
+        top = (chunks or [])[:8]
+        ctx_lines: list[str] = []
+        for c in top:
+            doc = str(c.get("document_name") or "")
+            st = c.get("start_time")
+            et = c.get("end_time")
+            t = (c.get("display_text") or c.get("video_description") or c.get("audio_transcript") or c.get("text") or "").strip()
+            if not t:
+                continue
+            t = t[:1200]
+            tr = ""
+            if st is not None and et is not None:
+                tr = f" ({int(float(st))}s–{int(float(et))}s)"
+            ctx_lines.append(f"- {doc}{tr}: {t}")
+
+        if not ctx_lines:
+            return None
+
+        system = (
+            "You answer questions about the user's videos using ONLY the provided evidence snippets.\n"
+            "If the evidence is insufficient, say so and ask a short clarifying question.\n"
+            "Return your response as JSON with keys: text (plain text) and html (simple HTML using <p>, <strong>, <ul>, <li>, <hr>)."
+        )
+        user = f"Question: {query}\n\nEvidence snippets:\n" + "\n".join(ctx_lines)
+        resp = _openrouter_client.chat.completions.create(
+            model=_openrouter_model,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            temperature=0.2,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        if not content:
+            return None
+        import json as _json
+        try:
+            parsed = _json.loads(content)
+            if isinstance(parsed, dict) and isinstance(parsed.get("text"), str):
+                html = parsed.get("html")
+                return {"text": parsed["text"], "html": html if isinstance(html, str) else ""}
+        except Exception:
+            pass
+        # Fallback if model didn't return JSON
+        return {"text": content, "html": ""}
+    except Exception as e:
+        logger.warning("LLM answer synthesis failed: %s", e)
+        return None
 
 # Base dir for videos and video_chunks (backend folder), so paths work regardless of process cwd
 _BACKEND_DIR = Path(__file__).resolve().parent

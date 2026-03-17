@@ -55,6 +55,7 @@ from main import (
     download_youtube,
     ingest_data,
     ingest_data_from_urls,
+    llm_answer_from_chunks,
     recover_video_to_cloudinary,
     retrieve_data,
     upload_directory_to_cloudinary,
@@ -132,6 +133,8 @@ class RetrieveRequest(BaseModel):
 class RetrieveResponse(BaseModel):
     success: bool
     chunks: list[dict]
+    answer_text: str | None = None
+    answer_html: str | None = None
     message: str | None = None
 
 class ChunkRequest(BaseModel):
@@ -390,7 +393,13 @@ def retrieve(
     """MCP: retrieve_data_tool. Query the Ragie index for this user; returns chunks with text, document_name, start_time, end_time."""
     try:
         chunks = retrieve_data(body.query, user_id=user_id)
-        return RetrieveResponse(success=True, chunks=chunks)
+        answer = llm_answer_from_chunks(body.query, chunks) if chunks else None
+        return RetrieveResponse(
+            success=True,
+            chunks=chunks,
+            answer_text=answer.get("text") if isinstance(answer, dict) else None,
+            answer_html=answer.get("html") if isinstance(answer, dict) else None,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -272,10 +272,10 @@ export default function ChatPage() {
       }
       await addChatMessage(chatId, 'user', html)
       const res = await retrieve(content)
-      const reply = res.chunks?.length
-        ? buildChatReplyFromChunks(res.chunks)
-        : 'No matching segments found in your videos.'
-      const replyHtml = buildChatReplyHtmlFromText(reply)
+      const reply =
+        (res.answer_text && res.answer_text.trim()) ||
+        (res.chunks?.length ? buildChatReplyFromChunks(res.chunks) : 'No matching segments found in your videos.')
+      const replyHtml = (res.answer_html && res.answer_html.trim()) ? res.answer_html : buildChatReplyHtmlFromText(reply)
       const chunk_refs = (res.chunks ?? [])
         .filter((c) => c.start_time != null && c.end_time != null)
         .map((c) => ({

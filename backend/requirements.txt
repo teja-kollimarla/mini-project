@@ -19,8 +19,8 @@ moviepy>=2.2.1
 # Optional: Jupyter
 ipykernel>=6.29.5
 
-# YouTube downloader (pin recent — YouTube changes break old versions fast)
-yt-dlp>=2025.3.0
+# YouTube downloader (pin exact — YouTube changes break old versions fast)
+yt-dlp==2026.3.13
 
 # Cloudinary (optional video storage)
 cloudinary>=1.36.0

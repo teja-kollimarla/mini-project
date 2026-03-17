@@ -100,16 +100,18 @@ function useQuillEditor(opts: {
       quillRef.current = q
 
       q.on('text-change', () => {
-        const html = (hostRef.current?.querySelector('.ql-editor') as HTMLElement | null)?.innerHTML ?? ''
+        const html = (q.root as HTMLElement | null)?.innerHTML ?? ''
         lastHtmlRef.current = html
         onChange(html)
       })
 
       // init value
-      const editor = hostRef.current?.querySelector('.ql-editor') as HTMLElement | null
-      if (editor) {
-        editor.innerHTML = value || ''
-        lastHtmlRef.current = value || ''
+      if (value && value.trim()) {
+        q.clipboard.dangerouslyPasteHTML(value)
+        lastHtmlRef.current = (q.root as HTMLElement).innerHTML
+      } else {
+        q.setText('')
+        lastHtmlRef.current = (q.root as HTMLElement).innerHTML
       }
     })()
     return () => {
@@ -125,13 +127,16 @@ function useQuillEditor(opts: {
 
   // External value updates (e.g. when we clear after send)
   useEffect(() => {
-    const host = hostRef.current
-    if (!host) return
-    const editor = host.querySelector('.ql-editor') as HTMLElement | null
-    if (!editor) return
+    const q = quillRef.current
+    if (!q) return
     if ((value || '') === (lastHtmlRef.current || '')) return
-    editor.innerHTML = value || ''
-    lastHtmlRef.current = value || ''
+    if (value && value.trim()) {
+      q.clipboard.dangerouslyPasteHTML(value)
+    } else {
+      // Important: Quill expects an empty doc to still be <p><br></p>
+      q.setText('')
+    }
+    lastHtmlRef.current = (q.root as HTMLElement | null)?.innerHTML ?? ''
   }, [value])
 
   return hostRef

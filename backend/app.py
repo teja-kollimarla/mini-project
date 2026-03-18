@@ -114,7 +114,8 @@ class IngestYouTubeResponse(BaseModel):
     documents: list[str] = []
 
 class IngestDirectoryRequest(BaseModel):
-    directory: str = Field("videos", description="Directory path relative to backend")
+    directory: str = Field("videos", description="Directory path relative to backend (e.g. 'videos' or 'videos/teja_gmailcom')")
+    clear_existing: bool = Field(True, description="If True, clear Ragie index for this user before ingesting; if False, add to existing index")
 
 class IngestDirectoryResponse(BaseModel):
     success: bool
@@ -284,13 +285,16 @@ def ingest_directory(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    """MCP: ingest_data_tool. Ingest videos from this user's directory into the Ragie index. Records videos in DB."""
+    """MCP: ingest_data_tool. Ingest videos from this user's directory into the Ragie index. Records videos in DB.
+    Uses backend/videos/{user_id} by default; pass directory='videos/teja_gmailcom' to ingest from that folder."""
     try:
-        clear_index(user_id=user_id)
-        directory = f"videos/{user_id}"
-        ingest_data(directory, user_id=user_id)
+        if body.clear_existing:
+            clear_index(user_id=user_id)
+        # Use requested directory or default to this user's folder (e.g. videos/teja_gmailcom)
+        directory = body.directory if body.directory and body.directory != "videos" else f"videos/{user_id}"
+        ingest_data(directory, extensions=VIDEO_EXTENSIONS, user_id=user_id)
         user = get_or_create_user(db, user_id)
-        vid_dir = Path(directory)
+        vid_dir = _BACKEND_DIR / directory
         if vid_dir.exists():
             files = [f.name for f in vid_dir.iterdir() if f.is_file() and f.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".m4a"}]
             if files:

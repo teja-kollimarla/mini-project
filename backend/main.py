@@ -682,9 +682,13 @@ def ingest_data_from_urls(
 
 # Ingest data from a directory into the Ragie index (optionally scoped to user_id)
 def ingest_data(directory, extensions: set | None = None, user_id: str | None = None, only_files: list[str] | None = None):
-    """Ingest video/files from directory. If only_files is set, ingest just those filenames (avoids re-ingesting whole dir)."""
+    """Ingest video/files from directory. If only_files is set, ingest just those filenames (avoids re-ingesting whole dir).
+    Directory is resolved relative to backend root (e.g. videos/teja_gmailcom -> backend/videos/teja_gmailcom)."""
     _ = _require_ragie()
     directory_path = Path(directory)
+    if not directory_path.is_absolute():
+        directory_path = _BACKEND_DIR / directory_path
+    directory_path = directory_path.resolve()
     files = os.listdir(directory_path)
     if extensions is not None:
         files = [f for f in files if Path(f).suffix.lower() in extensions]

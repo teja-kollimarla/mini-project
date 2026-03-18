@@ -411,40 +411,17 @@ def _extract_video_urls(url: str) -> list[str]:
         **_yt_dlp_cookie_opts(),
         **_yt_dlp_youtube_opts(),
     }
+    info = None
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            rc = ydl.download([url])
-            if rc != 0:
-                raise RuntimeError(f"yt-dlp failed with code {rc}")
-
+            info = ydl.extract_info(url, download=False)
     except Exception as e:
-        logger.warning(f"[yt-dlp] Download with cookies failed: {e}")
-
-        # 🔥 Retry WITHOUT cookies
-    try:
-        fallback_opts = {k: v for k, v in opts.items() if k != "cookiefile"}
-
-        logger.info("[yt-dlp] Retrying WITHOUT cookies...")
-
-        with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-            rc = ydl.download([url])
-            if rc != 0:
-                raise RuntimeError(f"yt-dlp fallback failed with code {rc}")
-
-    except Exception as e2:
-        err = str(e2).lower()
-
-        if "sign in" in err or "not a bot" in err:
-            raise RuntimeError(
-                "YouTube is blocking this request.\n"
-                "Fix: Update YT_DLP_COOKIES_CONTENT with fresh cookies.txt"
-            ) from e2
-
-        raise RuntimeError(f"Download failed (cookies + fallback): {e2}") from e2
+        logger.warning("Extract info failed, using URL as single video: %s", e)
+        return [url]
     if not info:
         return [url]
     if info.get("_type") == "playlist" and info.get("entries"):
-        urls = []
+        urls: list[str] = []
         for e in info["entries"]:
             if not e:
                 continue

@@ -38,6 +38,7 @@ type IngestionState = 'idle' | 'loading' | 'success' | 'error'
 export default function IngestPage() {
   const [youtubeUrl, setYoutubeUrl] = useState('')
   const [youtubeState, setYoutubeState] = useState<IngestionState>('idle')
+  const [youtubeError, setYoutubeError] = useState<string | null>(null)
   const [replaceIndex, setReplaceIndex] = useState(false)
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([])
   const [uploadState, setUploadState] = useState<IngestionState>('idle')
@@ -47,14 +48,19 @@ export default function IngestPage() {
   const handleYoutubeIngest = async () => {
     if (!youtubeUrl) return
     setYoutubeState('loading')
+    setYoutubeError(null)
     try {
-      const result = await ingestYoutube(youtubeUrl, replaceIndex)
+      await ingestYoutube(youtubeUrl, replaceIndex)
       setYoutubeState('success')
       setYoutubeUrl('')
       setTimeout(() => setYoutubeState('idle'), 3000)
     } catch (err) {
       setYoutubeState('error')
-      setTimeout(() => setYoutubeState('idle'), 4000)
+      setYoutubeError(err instanceof Error ? err.message : String(err))
+      setTimeout(() => {
+        setYoutubeState('idle')
+        setYoutubeError(null)
+      }, 4000)
     }
   }
 
@@ -174,7 +180,7 @@ export default function IngestPage() {
                     <Alert className="border-green-500/30 bg-green-500/10">
                       <CheckCircle className="h-4 w-4 text-green-500" />
                       <AlertDescription className="text-green-500">
-                        Successfully indexed! Check My Videos for the list.
+                        Ingested.
                       </AlertDescription>
                     </Alert>
                   )}
@@ -183,7 +189,7 @@ export default function IngestPage() {
                     <Alert className="border-red-500/30 bg-red-500/10">
                       <AlertCircle className="h-4 w-4 text-red-500" />
                       <AlertDescription className="text-red-500">
-                        Failed to ingest video. Please check the URL and try again.
+                        {youtubeError || 'Something went wrong. Please try again.'}
                       </AlertDescription>
                     </Alert>
                   )}
@@ -316,7 +322,7 @@ export default function IngestPage() {
                     <Alert className="border-green-500/30 bg-green-500/10">
                       <CheckCircle className="h-4 w-4 text-green-500" />
                       <AlertDescription className="text-green-500">
-                        Successfully uploaded and indexed. Check My Videos and Search.
+                        Ingested.
                       </AlertDescription>
                     </Alert>
                   )}
@@ -325,7 +331,7 @@ export default function IngestPage() {
                     <Alert className="border-red-500/30 bg-red-500/10">
                       <AlertCircle className="h-4 w-4 text-red-500" />
                       <AlertDescription className="text-red-500">
-                        {uploadError || 'Upload or indexing failed. Please try again.'}
+                        {uploadError || 'Something went wrong. Please try again.'}
                       </AlertDescription>
                     </Alert>
                   )}

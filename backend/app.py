@@ -260,7 +260,7 @@ def ingest_youtube(
         ingest_data(output_dir, extensions=VIDEO_EXTENSIONS, user_id=user_id)
         return IngestYouTubeResponse(
             success=True,
-            message=f"Downloaded and indexed {len(files)} video(s).",
+            message="Ingested.",
             count=len(files),
             documents=files,
         )
@@ -305,7 +305,7 @@ def ingest_directory(
                 else:
                     b2_keys = None
                 record_videos(db, user.id, files, source="upload", b2_keys=b2_keys)
-        return IngestDirectoryResponse(success=True, message="Data loaded successfully")
+        return IngestDirectoryResponse(success=True, message="Ingested.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -370,11 +370,11 @@ async def ingest_upload(
         all_ready = all(s.get("status") == "ready" for s in indexing_status)
         any_processing = any(s.get("status") == "processing" for s in indexing_status)
         if all_ready:
-            msg = f"Uploaded {len(saved_names)} video(s). All indexed and ready for search."
+            msg = "Ingested."
         elif any_processing:
-            msg = f"Uploaded {len(saved_names)} video(s). Some still processing; search may work shortly."
+            msg = "Ingested. Some still processing; search may work shortly."
         else:
-            msg = f"Uploaded {len(saved_names)} video(s). Indexing in progress; search may work in a few minutes."
+            msg = "Ingested. Indexing in progress; search may work in a few minutes."
         if cloudinary_failed:
             msg += f" ({len(cloudinary_failed)} not uploaded to Cloudinary—connection reset by remote; saved locally, indexed, and clip playback will use local file.)"
         return IngestUploadResponse(

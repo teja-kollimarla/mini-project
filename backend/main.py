@@ -48,20 +48,10 @@ VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".m4a"}
 
 
 def _yt_dlp_cookie_opts() -> dict:
-    """Cookie options for YouTube bot check: cookiesfrombrowser (e.g. chrome) or cookiefile (cookies.txt)."""
-    opts = {}
-    # 1) Browser cookies — set YT_DLP_COOKIES_FROM_BROWSER=chrome (or firefox, edge). Use tuple so yt-dlp gets one arg.
-    browser = os.getenv("YT_DLP_COOKIES_FROM_BROWSER", "").strip().lower()
-    if browser:
-        opts["cookiesfrombrowser"] = (browser.split(":")[0],)
-    # 2) Inline cookie content via env var — write to temp file at startup (for Railway where you can't upload files)
-    cookie_content = os.getenv("YT_DLP_COOKIES_CONTENT", "").strip()
-    if cookie_content:
-        tmp_cookie_path = Path("/tmp/yt_cookies.txt")
-        tmp_cookie_path.write_text(cookie_content)
-        opts["cookiefile"] = str(tmp_cookie_path)
-        return opts
-    # 3) Exported cookies.txt file path — YT_DLP_COOKIES_FILE env, or default backend/cookies.txt if it exists
+    """Cookie options for YouTube bot check: only support cookiefile (no browser cookies)."""
+    opts: dict = {}
+    # Exported cookies.txt file path — YT_DLP_COOKIES_FILE (set at startup from YT_DLP_COOKIES_CONTENT in production),
+    # or default backend/cookies.txt if it exists.
     cookiefile = os.getenv("YT_DLP_COOKIES_FILE", "").strip()
     if not cookiefile:
         default_cookies = Path(__file__).resolve().parent / "cookies.txt"
@@ -73,9 +63,16 @@ def _yt_dlp_cookie_opts() -> dict:
 
 
 def _yt_dlp_youtube_opts() -> dict:
-    """Options that may help with YouTube bot detection when not using cookies (e.g. Android client)."""
+    """
+    Shared yt-dlp YouTube extractor options.
+    Keeps player_client aligned between URL extraction and actual download.
+    """
     return {
-        "extractor_args": {"youtube": {"player_client": ["android"], "player_skip": ["webpage", "configs"]}},
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+            },
+        },
     }
 
 
@@ -96,6 +93,18 @@ if shutil.which(_ffmpeg_exe):
     logger.info("ffmpeg found: %s", shutil.which(_ffmpeg_exe))
 else:
     logger.warning("ffmpeg NOT found at '%s' — video merging/clipping will fail", _ffmpeg_exe)
+
+# Production (Railway): write cookie content from env to a file once at startup so yt-dlp can use it
+_yt_cookie_content = os.getenv("YT_DLP_COOKIES_CONTENT", "").strip()
+if _yt_cookie_content:
+    _cookie_dir = Path("/tmp") if Path("/tmp").is_dir() else _BACKEND_DIR
+    _cookie_path = _cookie_dir / "yt_cookies.txt"
+    try:
+        _cookie_path.write_text(_yt_cookie_content, encoding="utf-8")
+        os.environ.setdefault("YT_DLP_COOKIES_FILE", str(_cookie_path))
+        logger.info("Wrote YT_DLP_COOKIES_CONTENT to %s for yt-dlp", _cookie_path)
+    except Exception as e:
+        logger.warning("Could not write YT_DLP_COOKIES_CONTENT to file: %s", e)
 
 # Gemini/OpenAI/OpenRouter (optional) for LLM answers from retrieved chunks
 _gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
@@ -404,10 +413,34 @@ def _extract_video_urls(url: str) -> list[str]:
     }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            rc = ydl.download([url])
+            if rc != 0:
+                raise RuntimeError(f"yt-dlp failed with code {rc}")
+
     except Exception as e:
-        logger.warning("Extract info failed, using URL as single video: %s", e)
-        return [url]
+        logger.warning(f"[yt-dlp] Download with cookies failed: {e}")
+
+        # 🔥 Retry WITHOUT cookies
+    try:
+        fallback_opts = {k: v for k, v in opts.items() if k != "cookiefile"}
+
+        logger.info("[yt-dlp] Retrying WITHOUT cookies...")
+
+        with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+            rc = ydl.download([url])
+            if rc != 0:
+                raise RuntimeError(f"yt-dlp fallback failed with code {rc}")
+
+    except Exception as e2:
+        err = str(e2).lower()
+
+        if "sign in" in err or "not a bot" in err:
+            raise RuntimeError(
+                "YouTube is blocking this request.\n"
+                "Fix: Update YT_DLP_COOKIES_CONTENT with fresh cookies.txt"
+            ) from e2
+
+        raise RuntimeError(f"Download failed (cookies + fallback): {e2}") from e2
     if not info:
         return [url]
     if info.get("_type") == "playlist" and info.get("entries"):
@@ -438,17 +471,24 @@ def _download_one_video(
     Returns list of (filename, b2_key) for the new file(s) (usually 1).
     """
     out_tmpl = str(output_path / "%(id)s_%(title).80s.%(ext)s")
-    format_str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4"
-    opts = {
+    opts: dict = {
         "outtmpl": out_tmpl,
-        "format": format_str,
+        "format": "bestvideo+bestaudio/best",
         "merge_output_format": "mp4",
-        "quiet": False,
+        "noplaylist": True,
+        "quiet": True,
         "no_warnings": False,
         "retries": 3,
         "fragment_retries": 3,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        },
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+            },
+        },
         **_yt_dlp_cookie_opts(),
-        **_yt_dlp_youtube_opts(),
     }
     existing = set(f.name for f in output_path.iterdir() if f.is_file())
     try:

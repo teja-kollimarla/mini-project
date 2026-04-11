@@ -949,9 +949,16 @@ def chunks_look_relevant(query: str, chunks: list[dict]) -> bool:
     blob = " ".join(_chunk_text_blob(c).lower() for c in chunks[:8])
     # "Strong" tokens: short technical terms (npm/npx), anything with digits, or tokens with '+'/'-'/'_'
     strong = {t for t in q_tokens if len(t) <= 4 or any(ch.isdigit() for ch in t) or any(ch in t for ch in "+-_")}
+    blob_words = blob.split()
     if strong:
-        return any(t in blob for t in strong)
-    return any(t in blob for t in q_tokens)
+        return any(
+            t in blob or (len(t) >= 4 and any(w.startswith(t) for w in blob_words))
+            for t in strong
+        )
+    return any(
+        t in blob or (len(t) >= 4 and any(w.startswith(t) for w in blob_words))
+        for t in q_tokens
+    )
 
 
 def llm_general_answer(query: str) -> dict | None:

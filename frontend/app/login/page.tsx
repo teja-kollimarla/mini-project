@@ -183,12 +183,7 @@ export default function LoginPage() {
                 <Label htmlFor="password" className="text-sm font-medium">
                   Password
                 </Label>
-                <Link
-                  href="#"
-                  className="text-xs text-primary hover:text-primary/80 transition-colors"
-                >
-                  Forgot?
-                </Link>
+               
               </div>
               <div className="relative">
                 <Input
@@ -236,28 +231,9 @@ export default function LoginPage() {
             </motion.div>
           </motion.form>
 
-          <motion.div
-            className="my-6 flex items-center gap-4"
-            variants={item}
-            initial="hidden"
-            animate="visible"
-          >
-            <div className="flex-1 h-px bg-border" />
-            <span className="text-xs text-muted-foreground font-medium">or</span>
-            <div className="flex-1 h-px bg-border" />
-          </motion.div>
+          
 
-          <motion.div variants={item} initial="hidden" animate="visible">
-            <Button
-              type="button"
-              variant="outline"
-              className="w-full h-11 font-medium"
-              onClick={handleGuestLogin}
-              disabled={isLoading}
-            >
-              Continue as guest
-            </Button>
-          </motion.div>
+          
 
           <motion.p
             className="mt-6 text-center text-sm text-muted-foreground"

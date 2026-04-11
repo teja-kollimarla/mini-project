@@ -485,18 +485,22 @@ export default function ChatPage() {
                                   }
                                 </button>
                                 {isExpanded && (
-                                  <div className="px-3 pb-3 pt-2 border-t border-border/50 space-y-2">
-                                    <p className="text-sm leading-relaxed">{topic.explanation}</p>
-                                    {topic.details && (
+                                  <div className="px-3 pb-3 pt-2 border-t border-border/50 space-y-3">
+                                    {(topic.paragraph1 || topic.explanation) && (
+                                      <p className="text-sm leading-relaxed">{topic.paragraph1 || topic.explanation}</p>
+                                    )}
+                                    {(topic.paragraph2 || topic.details) && (
                                       <p className="text-sm leading-relaxed text-muted-foreground border-l-2 border-primary/30 pl-2">
-                                        {topic.details}
+                                        {topic.paragraph2 || topic.details}
                                       </p>
                                     )}
                                     {topic.key_points.length > 0 && (
-                                      <ul className="space-y-1 pt-1">
+                                      <ul className="space-y-1.5 pt-1">
                                         {topic.key_points.map((pt, pi) => (
                                           <li key={pi} className="flex items-start gap-2 text-sm">
-                                            <span className="text-primary mt-0.5 shrink-0">•</span>
+                                            <span className="shrink-0 mt-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-primary/10 text-primary text-[9px] font-bold">
+                                              {pi + 1}
+                                            </span>
                                             <span>{pt}</span>
                                           </li>
                                         ))}

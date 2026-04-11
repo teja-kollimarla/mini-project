@@ -20,9 +20,10 @@ export function getUserId(): string | null {
   return localStorage.getItem(USER_ID_KEY)
 }
 
-/** Set user id (called after login/register with external_id). */
+/** Set user id (called after login/register with external_id).
+ *  Strips chars outside [a-zA-Z0-9_-] — matches backend _safe_user_id exactly. */
 export function setUserId(id: string): void {
-  const safe = id.replace(/[^a-zA-Z0-9_-]/g, '_').replace(/_+/g, '_') || 'guest'
+  const safe = (id || '').replace(/[^a-zA-Z0-9_-]/g, '') || 'guest'
   if (isClient()) localStorage.setItem(USER_ID_KEY, safe)
 }
 
@@ -220,7 +221,11 @@ export type TopicSummary = {
   title: string
   start_time: number
   end_time: number
-  explanation: string
+  // new two-paragraph format
+  paragraph1?: string
+  paragraph2?: string
+  // legacy fields kept for backward compat with cached summaries
+  explanation?: string
   details?: string
   key_points: string[]
   document_name: string
@@ -268,8 +273,12 @@ export async function listChunks() {
 }
 
 export function clipPlayUrl(filename: string): string {
+  const token = getAccessToken()
   const userId = getUserId()
-  return `${API_URL}/api/chunks/files/${encodeURIComponent(filename)}?user_id=${encodeURIComponent(userId || '')}`
+  const param = token
+    ? `token=${encodeURIComponent(token)}`
+    : `user_id=${encodeURIComponent(userId || '')}`
+  return `${API_URL}/api/chunks/files/${encodeURIComponent(filename)}?${param}`
 }
 
 // --- Videos (from DB) ---
@@ -281,8 +290,14 @@ export async function listVideos() {
 /** Playback URL for a video: Cloudinary (b2_key) or backend stream for local file. */
 export function videoPlayUrl(video: { b2_key: string | null; filename: string }): string {
   if (video.b2_key && video.b2_key.startsWith('http')) return video.b2_key
+  // Pass JWT token so the backend resolves the path using the same external_id used during ingestion.
+  // Falls back to user_id if no token (unauthenticated playback).
+  const token = getAccessToken()
   const userId = getUserId()
-  return `${API_URL}/api/videos/stream/${encodeURIComponent(video.filename)}?user_id=${encodeURIComponent(userId || '')}`
+  const param = token
+    ? `token=${encodeURIComponent(token)}`
+    : `user_id=${encodeURIComponent(userId || '')}`
+  return `${API_URL}/api/videos/stream/${encodeURIComponent(video.filename)}?${param}`
 }
 
 // --- Chats ---

@@ -1036,6 +1036,7 @@ def summarize_video(document_name: str, user_id: str | None = None) -> dict | No
         request: dict = {
             "query": "main topics concepts overview introduction explanation summary key points",
             "filter": {"document_name": {"$eq": document_name}},
+            "top_k": 100,
         }
         if user_id:
             request["partition"] = _partition_for_user(user_id)
@@ -1058,7 +1059,7 @@ def summarize_video(document_name: str, user_id: str | None = None) -> dict | No
                 "document_name": chunk.document_name,
                 "start_time": start,
                 "end_time": end,
-                "content": content[:2000],
+                "content": content[:3000],
             })
         # Post-filter to target document in case Ragie filter wasn't applied
         chunks = [c for c in chunks if c["document_name"] == document_name]
@@ -1079,22 +1080,47 @@ def summarize_video(document_name: str, user_id: str | None = None) -> dict | No
     evidence = "\n\n".join(evidence_lines)
 
     system = (
-        "You are an expert educational content analyzer. Given time-stamped video transcript segments, "
-        "generate a thorough, structured, topic-by-topic summary of the entire video.\n\n"
-        "Return ONLY valid JSON (no markdown fences) with this exact shape:\n"
-        '{"title":"Concise video title","topics":[{"title":"Topic Name","start_time":0.0,"end_time":120.0,'
-        '"explanation":"Detailed 4-6 sentence educational explanation covering what this topic is, why it matters, '
-        'and how it connects to the broader subject.","details":"2-3 additional sentences diving deeper into '
-        'the nuances, examples, or sub-concepts covered in this segment of the video.",'
-        '"key_points":["Point 1","Point 2","Point 3"]}]}\n\n'
-        "Rules:\n"
-        "- Group segments into 3-8 logical topics in chronological order\n"
-        "- explanation: 4-6 sentences — thorough, educational, explain the concept clearly\n"
-        "- details: 2-3 sentences — go deeper with examples, edge cases, or related concepts from the transcript\n"
-        "- key_points: 4-6 concise bullet points summarising the most important takeaways\n"
-        "- start_time/end_time: accurate bounds in seconds from the transcript timestamps\n"
-        "- Use the actual transcript content to ground every explanation — do not hallucinate\n"
-        "- Focus entirely on concepts and knowledge; ignore camera angles, background, appearance of people"
+        "You are an expert educator and content analyst. "
+        "Given time-stamped video transcript segments, produce a comprehensive, in-depth, topic-by-topic breakdown.\n\n"
+        "Return ONLY valid JSON (no markdown fences) with EXACTLY this shape:\n"
+        "{\n"
+        '  "title": "Descriptive video title",\n'
+        '  "topics": [\n'
+        '    {\n'
+        '      "title": "Topic Name",\n'
+        '      "start_time": 0.0,\n'
+        '      "end_time": 120.0,\n'
+        '      "paragraph1": "FIRST full paragraph (5-6 sentences). Introduce the topic: what it is, '
+        'its definition, its purpose, and why it matters in context. Write as if explaining to a student '
+        'hearing this for the first time. Use plain, clear language.",\n'
+        '      "paragraph2": "SECOND full paragraph (5-6 sentences). Go deeper: explain HOW it works, '
+        'the mechanism or process involved, its relationship to other concepts covered in the video. '
+        'Include at least one concrete example drawn directly from the transcript.",\n'
+        '      "key_points": [\n'
+        '        "Point 1: full sentence with context and example — not just a label",\n'
+        '        "Point 2: full sentence",\n'
+        '        "Point 3: full sentence",\n'
+        '        "Point 4: full sentence",\n'
+        '        "Point 5: full sentence",\n'
+        '        "Point 6: full sentence",\n'
+        '        "Point 7: full sentence",\n'
+        '        "Point 8: full sentence",\n'
+        '        "Point 9: full sentence",\n'
+        '        "Point 10: full sentence with a real example from the transcript"\n'
+        '      ]\n'
+        '    }\n'
+        '  ]\n'
+        "}\n\n"
+        "STRICT RULES — violating these makes the response useless:\n"
+        "- paragraph1 and paragraph2: each MUST be 5-6 full sentences minimum. Never write less.\n"
+        "- key_points: EXACTLY 10 items. Each point must be a complete sentence with enough context "
+        "to be understood on its own. At least 3 points must include a concrete example.\n"
+        "- Ground every sentence in the actual transcript content — quote or paraphrase specific "
+        "things said in the video.\n"
+        "- Group segments into 4-8 logical topics in strict chronological order.\n"
+        "- start_time/end_time: accurate seconds from the transcript timestamps.\n"
+        "- Do NOT write placeholder text like 'Point 1' or 'Example here'.\n"
+        "- Ignore camera, background, clothing, or physical appearance entirely."
     )
     user_msg = f"Video file: {document_name}\n\nTranscript segments:\n{evidence}"
     cache_key = "summary:" + str(hash((document_name, user_id or "")))

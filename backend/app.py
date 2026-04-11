@@ -10,9 +10,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import Depends, File, Form, FastAPI, Header, HTTPException, UploadFile
+from fastapi import Depends, File, Form, FastAPI, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -63,6 +63,43 @@ from main import (
     retrieve_data,
     upload_directory_to_cloudinary,
 )
+
+
+def _range_streaming_response(path: Path, request: Request, media_type: str = "video/mp4") -> StreamingResponse | FileResponse:
+    """Return a 206 Partial Content response honouring the HTTP Range header, enabling browser seek."""
+    file_size = path.stat().st_size
+    range_header = request.headers.get("Range")
+    if range_header:
+        m = re.match(r"bytes=(\d+)-(\d*)", range_header)
+        if m:
+            start = int(m.group(1))
+            end = int(m.group(2)) if m.group(2) else file_size - 1
+            end = min(end, file_size - 1)
+            chunk_len = end - start + 1
+
+            def _iter(p: Path, s: int, length: int, bs: int = 1 << 20):
+                with open(p, "rb") as f:
+                    f.seek(s)
+                    remaining = length
+                    while remaining > 0:
+                        data = f.read(min(bs, remaining))
+                        if not data:
+                            break
+                        remaining -= len(data)
+                        yield data
+
+            return StreamingResponse(
+                _iter(path, start, chunk_len),
+                status_code=206,
+                media_type=media_type,
+                headers={
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": str(chunk_len),
+                    "Cache-Control": "no-cache",
+                },
+            )
+    return FileResponse(path, media_type=media_type, headers={"Accept-Ranges": "bytes"})
 
 
 def _safe_user_id(user_id: str | None) -> str:
@@ -602,11 +639,20 @@ def list_chunks(
 @app.get("/api/chunks/files/{filename}")
 def get_chunk_file(
     filename: str,
+    request: Request,
     x_user_id: str | None = Header(None, alias="X-User-Id"),
-    user_id: str | None = None,
 ):
-    """Stream this user's video chunk for playback. Pass X-User-Id header or user_id query param."""
-    uid = user_id or x_user_id
+    """Stream this user's video chunk for playback with Range support."""
+    token = request.query_params.get("token")
+    user_id = request.query_params.get("user_id")
+
+    if token:
+        external_id = get_external_id_from_access_token(token)
+        if not external_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        uid = external_id
+    else:
+        uid = user_id or x_user_id
     if not uid:
         raise HTTPException(status_code=400, detail="X-User-Id header or user_id query param required")
     safe_uid = _safe_user_id(uid)
@@ -614,7 +660,7 @@ def get_chunk_file(
     path = _chunks_dir_for_user(safe_uid) / safe_name
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Chunk not found")
-    return FileResponse(path, media_type="video/mp4")
+    return _range_streaming_response(path, request, media_type="video/mp4")
 
 
 # --- Register (create user with bcrypt password, JWT + session in DB) ---
@@ -775,19 +821,29 @@ def list_videos(
 @app.get("/api/videos/stream/{filename}")
 def stream_video(
     filename: str,
+    request: Request,
     x_user_id: str | None = Header(None, alias="X-User-Id"),
-    user_id: str | None = None,
 ):
-    """Stream this user's video file for playback. Use when b2_key is null (local file). Pass user_id query or X-User-Id header."""
-    uid = user_id or x_user_id
+    """Stream this user's video file with HTTP Range support for seeking.
+    Auth: ?token=<jwt> (preferred), ?user_id=, or X-User-Id header."""
+    token = request.query_params.get("token")
+    user_id = request.query_params.get("user_id")
+
+    if token:
+        external_id = get_external_id_from_access_token(token)
+        if not external_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        uid = external_id
+    else:
+        uid = user_id or x_user_id
     if not uid:
-        raise HTTPException(status_code=400, detail="user_id query or X-User-Id header required")
+        raise HTTPException(status_code=400, detail="token, user_id, or X-User-Id required")
     safe_uid = _safe_user_id(uid)
     safe_name = Path(filename).name
     path = VIDEOS_BASE / safe_uid / safe_name
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Video file not found")
-    return FileResponse(path, media_type="video/mp4")
+    return _range_streaming_response(path, request, media_type="video/mp4")
 
 
 # --- Chats and messages ---

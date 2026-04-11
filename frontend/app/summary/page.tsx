@@ -1,21 +1,71 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { BookOpen, FileVideo, Loader2, ChevronDown, ChevronUp, RefreshCw, Play } from 'lucide-react'
+import { BookOpen, FileVideo, Loader2, ChevronDown, ChevronUp, RefreshCw, Play, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { DashboardLayout } from '@/components/dashboard-layout'
-import { listVideos, summarizeVideo, createChunk, clipPlayUrl, type TopicSummary } from '@/lib/api'
+import { listVideos, summarizeVideo, videoPlayUrl, type TopicSummary } from '@/lib/api'
 
 type VideoRow = {
   id: string
   filename: string
   source: string
+  b2_key: string | null
 }
 
 type SummaryResult = {
   title: string
   topics: TopicSummary[]
+}
+
+function InlinePlayer({
+  src,
+  startTime,
+  onClose,
+}: {
+  src: string
+  startTime: number
+  onClose: () => void
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null)
+
+  const handleCanPlay = () => {
+    const v = videoRef.current
+    if (!v) return
+    if (startTime > 0 && Math.abs(v.currentTime - startTime) > 0.5) {
+      v.currentTime = startTime
+    }
+    v.play().catch(() => {/* autoplay blocked — user can press play manually */})
+  }
+
+  return (
+    <div className="mt-3 rounded-xl overflow-hidden border border-border bg-black relative">
+      <button
+        type="button"
+        onClick={onClose}
+        className="absolute top-2 right-2 z-10 bg-black/60 hover:bg-black/80 text-white rounded-full p-1 transition-colors"
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
+      <video
+        ref={videoRef}
+        src={src}
+        controls
+        className="w-full max-h-72 object-contain"
+        onLoadedMetadata={() => {
+          const v = videoRef.current
+          if (v && startTime > 0) v.currentTime = startTime
+        }}
+        onCanPlay={handleCanPlay}
+      />
+      {startTime > 0 && (
+        <p className="text-xs text-center text-white/50 py-1 bg-black">
+          Seeked to {Math.floor(startTime)}s
+        </p>
+      )}
+    </div>
+  )
 }
 
 export default function SummaryPage() {
@@ -26,11 +76,16 @@ export default function SummaryPage() {
   const [generating, setGenerating] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [expandedTopics, setExpandedTopics] = useState<Set<string>>(new Set())
-  const [clippingSegment, setClippingSegment] = useState<string | null>(null)
+  const [watchingTopic, setWatchingTopic] = useState<string | null>(null)
 
   useEffect(() => {
     listVideos()
-      .then((v) => setVideos(v.map((r) => ({ id: r.id, filename: r.filename, source: r.source }))))
+      .then((v) => setVideos(v.map((r) => ({
+        id: r.id,
+        filename: r.filename,
+        source: r.source,
+        b2_key: r.b2_key,
+      }))))
       .catch(() => setError('Failed to load videos'))
       .finally(() => setLoadingVideos(false))
   }, [])
@@ -39,6 +94,7 @@ export default function SummaryPage() {
     setError(null)
     setGenerating(filename)
     setSelected(filename)
+    setWatchingTopic(null)
     try {
       const res = await summarizeVideo(filename)
       if (res.success && res.topics.length > 0) {
@@ -60,23 +116,11 @@ export default function SummaryPage() {
       next.has(key) ? next.delete(key) : next.add(key)
       return next
     })
+    // Close player when collapsing
+    setWatchingTopic((prev) => (prev === key ? null : prev))
   }
 
-  const handleWatchSegment = async (doc: string, start: number, end: number) => {
-    const key = `${doc}:${start}-${end}`
-    setClippingSegment(key)
-    try {
-      const res = await createChunk(doc, start, end)
-      if (res.url?.startsWith('http')) window.open(res.url, '_blank')
-      else if (res.filename) window.open(clipPlayUrl(res.filename), '_blank')
-    } catch {
-      setError('Failed to create clip')
-    } finally {
-      setClippingSegment(null)
-    }
-  }
-
-  const selectedSummary = selected ? summaries[selected] : undefined
+  const selectedVideo = selected ? videos.find((v) => v.filename === selected) ?? null : null
 
   return (
     <DashboardLayout>
@@ -120,6 +164,7 @@ export default function SummaryPage() {
                       type="button"
                       onClick={() => {
                         setSelected(v.filename)
+                        setWatchingTopic(null)
                         if (!hasSummary && !isGenerating) handleGenerate(v.filename)
                       }}
                       className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-left text-sm transition-colors border ${
@@ -200,12 +245,14 @@ export default function SummaryPage() {
                     {summaries[selected]!.topics.map((topic, idx) => {
                       const topicKey = `${selected}-${idx}`
                       const isExpanded = expandedTopics.has(topicKey)
-                      const timeLabel =
+                      const isWatching = watchingTopic === topicKey
+                      const hasTimestamp =
                         topic.start_time != null &&
                         topic.end_time != null &&
                         (topic.start_time > 0 || topic.end_time > 0)
-                          ? `${Math.floor(topic.start_time)}s – ${Math.floor(topic.end_time)}s`
-                          : null
+                      const timeLabel = hasTimestamp
+                        ? `${Math.floor(topic.start_time)}s – ${Math.floor(topic.end_time)}s`
+                        : null
 
                       return (
                         <motion.div
@@ -215,6 +262,7 @@ export default function SummaryPage() {
                           transition={{ delay: idx * 0.05 }}
                           className="border border-border rounded-xl overflow-hidden"
                         >
+                          {/* Topic header row */}
                           <button
                             type="button"
                             onClick={() => toggleTopic(topicKey)}
@@ -235,6 +283,7 @@ export default function SummaryPage() {
                             }
                           </button>
 
+                          {/* Expanded content */}
                           <AnimatePresence>
                             {isExpanded && (
                               <motion.div
@@ -244,27 +293,39 @@ export default function SummaryPage() {
                                 transition={{ duration: 0.2 }}
                                 className="overflow-hidden"
                               >
-                                <div className="px-4 pb-4 pt-3 border-t border-border/50 space-y-4">
-                                  {/* Explanation */}
-                                  <p className="text-sm leading-relaxed">
-                                    {topic.explanation}
-                                  </p>
+                                <div className="px-4 pb-5 pt-3 border-t border-border/50 space-y-5">
 
-                                  {/* Deeper details */}
-                                  {topic.details && (
-                                    <p className="text-sm leading-relaxed text-muted-foreground border-l-2 border-primary/30 pl-3">
-                                      {topic.details}
+                                  {/* Paragraph 1 — Introduction */}
+                                  {(topic.paragraph1 || topic.explanation) && (
+                                    <p className="text-sm leading-7">
+                                      {topic.paragraph1 || topic.explanation}
                                     </p>
                                   )}
 
-                                  {/* Key points */}
+                                  {/* Paragraph 2 — Deep dive with examples */}
+                                  {(topic.paragraph2 || topic.details) && (
+                                    <div className="border-l-2 border-primary/40 pl-4 py-0.5">
+                                      <p className="text-xs font-semibold text-primary/70 uppercase tracking-wide mb-1.5">
+                                        In Depth
+                                      </p>
+                                      <p className="text-sm leading-7 text-muted-foreground">
+                                        {topic.paragraph2 || topic.details}
+                                      </p>
+                                    </div>
+                                  )}
+
+                                  {/* Key points — 10 detailed bullets */}
                                   {topic.key_points.length > 0 && (
                                     <div>
-                                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Key Points</p>
-                                      <ul className="space-y-1.5">
+                                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-3">
+                                        Key Points ({topic.key_points.length})
+                                      </p>
+                                      <ul className="space-y-2.5">
                                         {topic.key_points.map((pt, pi) => (
-                                          <li key={pi} className="flex items-start gap-2 text-sm">
-                                            <span className="text-primary mt-0.5 shrink-0 font-bold">•</span>
+                                          <li key={pi} className="flex items-start gap-3 text-sm leading-6">
+                                            <span className="shrink-0 mt-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-primary/10 text-primary text-[10px] font-bold">
+                                              {pi + 1}
+                                            </span>
                                             <span>{pt}</span>
                                           </li>
                                         ))}
@@ -272,23 +333,28 @@ export default function SummaryPage() {
                                     </div>
                                   )}
 
-                                  {/* Watch segment button */}
-                                  {topic.start_time != null && topic.end_time != null &&
-                                    (topic.start_time > 0 || topic.end_time > 0) && (
-                                    <Button
-                                      type="button"
-                                      variant="outline"
-                                      size="sm"
-                                      className="text-xs gap-1.5"
-                                      disabled={clippingSegment === `${topic.document_name}:${topic.start_time}-${topic.end_time}`}
-                                      onClick={() => handleWatchSegment(topic.document_name, topic.start_time, topic.end_time)}
-                                    >
-                                      {clippingSegment === `${topic.document_name}:${topic.start_time}-${topic.end_time}` ? (
-                                        <><Loader2 className="h-3 w-3 animate-spin" />Creating clip…</>
+                                  {/* Watch segment — inline player */}
+                                  {hasTimestamp && selectedVideo && (
+                                    <div>
+                                      {!isWatching ? (
+                                        <Button
+                                          type="button"
+                                          variant="outline"
+                                          size="sm"
+                                          className="text-xs gap-1.5"
+                                          onClick={() => setWatchingTopic(topicKey)}
+                                        >
+                                          <Play className="h-3 w-3" />
+                                          Watch this segment
+                                        </Button>
                                       ) : (
-                                        <><Play className="h-3 w-3" />Watch this segment</>
+                                        <InlinePlayer
+                                          src={videoPlayUrl({ b2_key: selectedVideo.b2_key, filename: selectedVideo.filename })}
+                                          startTime={topic.start_time}
+                                          onClose={() => setWatchingTopic(null)}
+                                        />
                                       )}
-                                    </Button>
+                                    </div>
                                   )}
                                 </div>
                               </motion.div>

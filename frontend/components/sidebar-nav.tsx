@@ -2,14 +2,15 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { 
-  Home, 
-  Upload, 
-  MessageCircle, 
-  Film, 
+import {
+  Home,
+  Upload,
+  MessageCircle,
+  Film,
   Settings,
   LogOut,
-  Play
+  Play,
+  BookOpen
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -18,6 +19,7 @@ const navItems = [
   { href: '/dashboard', label: 'Home', icon: Home },
   { href: '/ingest', label: 'Ingest', icon: Upload },
   { href: '/chats', label: 'Chats', icon: MessageCircle },
+  { href: '/summary', label: 'Summary', icon: BookOpen },
   { href: '/videos', label: 'My Videos', icon: Film },
   { href: '/settings', label: 'Settings', icon: Settings },
 ]

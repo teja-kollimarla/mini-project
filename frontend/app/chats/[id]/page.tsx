@@ -3,11 +3,11 @@
 import { useState, useRef, useEffect } from 'react'
 import { useParams } from 'next/navigation'
 import { motion } from 'framer-motion'
-import { Send, Loader2 } from 'lucide-react'
+import { Send, Loader2, BookOpen, FileVideo, ChevronDown, ChevronUp } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { DashboardLayout } from '@/components/dashboard-layout'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
-import { getChat, addChatMessage, retrieve, createChunk, clipPlayUrl, updateChat } from '@/lib/api'
+import { getChat, addChatMessage, retrieve, createChunk, clipPlayUrl, updateChat, listVideos, summarizeVideo, type TopicSummary } from '@/lib/api'
 import DOMPurify from 'dompurify'
 import { Textarea } from '@/components/ui/textarea'
 
@@ -42,7 +42,10 @@ interface Message {
 interface AssistantContent {
   text?: string
   html?: string
-  chunk_refs?: Array< { document_name: string; start_time: number; end_time: number } >
+  chunk_refs?: Array<{ document_name: string; start_time: number; end_time: number }>
+  topics?: TopicSummary[]
+  video_title?: string
+  summary_document?: string
 }
 
 function parseAssistantContent(
@@ -232,6 +235,11 @@ export default function ChatPage() {
   const [isLoading, setIsLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [clippingSegment, setClippingSegment] = useState<string | null>(null)
+  const [showSummarize, setShowSummarize] = useState(false)
+  const [summarizeVideos, setSummarizeVideos] = useState<Array<{ id: string; filename: string }>>([])
+  const [loadingVideos, setLoadingVideos] = useState(false)
+  const [summarizing, setSummarizing] = useState(false)
+  const [expandedTopics, setExpandedTopics] = useState<Set<string>>(new Set())
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   const handleWatchSegment = async (doc: string, start: number, end: number) => {
@@ -245,6 +253,49 @@ export default function ChatPage() {
       setLoadError('Failed to create clip')
     } finally {
       setClippingSegment(null)
+    }
+  }
+
+  const handleOpenSummarize = async () => {
+    setShowSummarize((prev) => !prev)
+    if (!summarizeVideos.length) {
+      setLoadingVideos(true)
+      try {
+        const videos = await listVideos()
+        setSummarizeVideos(videos.map((v) => ({ id: v.id, filename: v.filename })))
+      } catch {
+        // non-fatal
+      } finally {
+        setLoadingVideos(false)
+      }
+    }
+  }
+
+  const handleSummarizeVideo = async (filename: string) => {
+    if (!chatId || !chat) return
+    setShowSummarize(false)
+    setSummarizing(true)
+
+    try {
+      if (!chat.title || !chat.title.trim()) {
+        const t = `Summary: ${filename}`
+        try {
+          await updateChat(chatId, { title: t })
+          setChat((prev) => (prev ? { ...prev, title: t } : prev))
+        } catch { /* non-fatal */ }
+      }
+      await addChatMessage(chatId, 'user', `Summarize video: ${filename}`)
+      const res = await summarizeVideo(filename)
+      const assistantContent = res.success && res.topics.length > 0
+        ? JSON.stringify({ video_title: res.title, summary_document: filename, topics: res.topics })
+        : JSON.stringify({ text: res.message || 'Could not generate a summary for this video.' })
+      await addChatMessage(chatId, 'assistant', assistantContent)
+      const updated = await getChat(chatId)
+      setChat((prev) => (prev ? { ...prev, messages: updated.messages as Message[] } : null))
+    } catch {
+      setLoadError('Failed to generate summary')
+    } finally {
+      setSummarizing(false)
     }
   }
 
@@ -385,9 +436,102 @@ export default function ChatPage() {
               >
                 {message.role === 'assistant' ? (() => {
                   const parsed = parseAssistantContent(message.content)
+                  const topics = parsed?.topics
                   const displayText = parsed?.text ?? message.content
                   const displayHtml = parsed?.html
                   const refs = parsed?.chunk_refs ?? []
+
+                  // --- Topic summary card rendering ---
+                  if (topics && topics.length > 0) {
+                    const videoTitle = parsed?.video_title || parsed?.summary_document || ''
+                    return (
+                      <>
+                        <div className="mb-3 flex items-center gap-2">
+                          <BookOpen className="h-4 w-4 text-primary" />
+                          <span className="text-sm font-semibold">{videoTitle}</span>
+                        </div>
+                        <div className="space-y-3">
+                          {topics.map((topic, idx) => {
+                            const topicKey = `${message.id}-${idx}`
+                            const isExpanded = expandedTopics.has(topicKey)
+                            const timeLabel = (topic.start_time != null && topic.end_time != null && (topic.start_time > 0 || topic.end_time > 0))
+                              ? `${Math.floor(topic.start_time)}s – ${Math.floor(topic.end_time)}s`
+                              : null
+                            return (
+                              <div key={topicKey} className="border border-border rounded-lg overflow-hidden">
+                                <button
+                                  type="button"
+                                  className="w-full flex items-center justify-between px-3 py-2.5 text-left hover:bg-muted/50 transition-colors"
+                                  onClick={() => setExpandedTopics((prev) => {
+                                    const next = new Set(prev)
+                                    next.has(topicKey) ? next.delete(topicKey) : next.add(topicKey)
+                                    return next
+                                  })}
+                                >
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <span className="text-xs font-semibold text-primary/70 shrink-0">
+                                      {String(idx + 1).padStart(2, '0')}
+                                    </span>
+                                    <span className="text-sm font-medium truncate">{topic.title}</span>
+                                    {timeLabel && (
+                                      <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded shrink-0">
+                                        {timeLabel}
+                                      </span>
+                                    )}
+                                  </div>
+                                  {isExpanded
+                                    ? <ChevronUp className="h-4 w-4 text-muted-foreground shrink-0" />
+                                    : <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
+                                  }
+                                </button>
+                                {isExpanded && (
+                                  <div className="px-3 pb-3 pt-2 border-t border-border/50 space-y-2">
+                                    <p className="text-sm leading-relaxed">{topic.explanation}</p>
+                                    {topic.details && (
+                                      <p className="text-sm leading-relaxed text-muted-foreground border-l-2 border-primary/30 pl-2">
+                                        {topic.details}
+                                      </p>
+                                    )}
+                                    {topic.key_points.length > 0 && (
+                                      <ul className="space-y-1 pt-1">
+                                        {topic.key_points.map((pt, pi) => (
+                                          <li key={pi} className="flex items-start gap-2 text-sm">
+                                            <span className="text-primary mt-0.5 shrink-0">•</span>
+                                            <span>{pt}</span>
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    )}
+                                    {topic.start_time != null && topic.end_time != null && (topic.start_time > 0 || topic.end_time > 0) && (
+                                      <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        className="text-xs mt-1"
+                                        disabled={clippingSegment === `${topic.document_name}:${topic.start_time}-${topic.end_time}`}
+                                        onClick={() => handleWatchSegment(topic.document_name, topic.start_time, topic.end_time)}
+                                      >
+                                        {clippingSegment === `${topic.document_name}:${topic.start_time}-${topic.end_time}` ? (
+                                          <><Loader2 className="h-3 w-3 animate-spin mr-1.5" />Creating…</>
+                                        ) : (
+                                          <>▶ Watch segment</>
+                                        )}
+                                      </Button>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })}
+                        </div>
+                        <p className="text-xs mt-3 text-muted-foreground">
+                          {new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </p>
+                      </>
+                    )
+                  }
+
+                  // --- Standard text/html message rendering ---
                   return (
                     <>
                       {displayHtml ? (
@@ -491,6 +635,47 @@ export default function ChatPage() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4 }}
         >
+          {/* Summarize video picker */}
+          <div className="mb-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="text-xs gap-1.5"
+              onClick={handleOpenSummarize}
+              disabled={summarizing}
+            >
+              {summarizing ? (
+                <><Loader2 className="h-3.5 w-3.5 animate-spin" />Generating summary…</>
+              ) : (
+                <><BookOpen className="h-3.5 w-3.5" />Summarize Video{showSummarize ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}</>
+              )}
+            </Button>
+            {showSummarize && (
+              <div className="mt-2 border border-border rounded-lg bg-card shadow-sm max-h-48 overflow-y-auto">
+                {loadingVideos ? (
+                  <div className="flex items-center gap-2 px-3 py-3 text-sm text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />Loading videos…
+                  </div>
+                ) : summarizeVideos.length === 0 ? (
+                  <p className="px-3 py-3 text-sm text-muted-foreground">No videos indexed yet.</p>
+                ) : (
+                  summarizeVideos.map((v) => (
+                    <button
+                      key={v.id}
+                      type="button"
+                      className="w-full flex items-center gap-2 px-3 py-2.5 text-sm hover:bg-muted/60 transition-colors text-left border-b border-border/40 last:border-0"
+                      onClick={() => handleSummarizeVideo(v.filename)}
+                    >
+                      <FileVideo className="h-4 w-4 text-muted-foreground shrink-0" />
+                      <span className="truncate">{v.filename}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+
           <div className="flex gap-2 items-end">
             <div className="flex-1">
               <Textarea

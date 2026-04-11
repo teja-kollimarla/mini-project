@@ -1020,6 +1020,140 @@ def llm_general_answer(query: str) -> dict | None:
         logger.warning("General LLM answer failed: %s", e)
         return None
 
+def summarize_video(document_name: str, user_id: str | None = None) -> dict | None:
+    """
+    Generate a structured, topic-based summary of a specific video.
+    Returns {"title": str, "topics": [{title, start_time, end_time, explanation, key_points, document_name}]}
+    or None on failure.
+    """
+    providers = _answer_models()
+    if not providers or not document_name:
+        return None
+
+    # Fetch chunks for this document from Ragie
+    try:
+        rag = _require_ragie()
+        request: dict = {
+            "query": "main topics concepts overview introduction explanation summary key points",
+            "filter": {"document_name": {"$eq": document_name}},
+        }
+        if user_id:
+            request["partition"] = _partition_for_user(user_id)
+        retrieval_response = rag.retrievals.retrieve(request=request)
+
+        import json as _json
+        chunks: list[dict] = []
+        for chunk in retrieval_response.scored_chunks:
+            meta = dict(chunk.document_metadata or {}) if hasattr(chunk.document_metadata, "items") else {}
+            text = (chunk.text or "").strip()
+            audio_txt = (meta.get("audio_transcript") or "").strip()
+            video_desc = (meta.get("video_description") or "").strip()
+            start = chunk.metadata.get("start_time") if chunk.metadata else None
+            end = chunk.metadata.get("end_time") if chunk.metadata else None
+            # Prefer audio transcript for summary; fall back to video_description then raw text
+            content = audio_txt or video_desc or text
+            if not content:
+                continue
+            chunks.append({
+                "document_name": chunk.document_name,
+                "start_time": start,
+                "end_time": end,
+                "content": content[:2000],
+            })
+        # Post-filter to target document in case Ragie filter wasn't applied
+        chunks = [c for c in chunks if c["document_name"] == document_name]
+    except Exception as e:
+        logger.warning("summarize_video: Ragie retrieval failed: %s", e)
+        return None
+
+    if not chunks:
+        return None
+
+    chunks.sort(key=lambda c: float(c.get("start_time") or 0))
+
+    evidence_lines: list[str] = []
+    for c in chunks[:60]:
+        st, et = c.get("start_time"), c.get("end_time")
+        tr = f"[{int(float(st))}s–{int(float(et))}s] " if (st is not None and et is not None) else ""
+        evidence_lines.append(f"{tr}{c['content']}")
+    evidence = "\n\n".join(evidence_lines)
+
+    system = (
+        "You are an expert educational content analyzer. Given time-stamped video transcript segments, "
+        "generate a thorough, structured, topic-by-topic summary of the entire video.\n\n"
+        "Return ONLY valid JSON (no markdown fences) with this exact shape:\n"
+        '{"title":"Concise video title","topics":[{"title":"Topic Name","start_time":0.0,"end_time":120.0,'
+        '"explanation":"Detailed 4-6 sentence educational explanation covering what this topic is, why it matters, '
+        'and how it connects to the broader subject.","details":"2-3 additional sentences diving deeper into '
+        'the nuances, examples, or sub-concepts covered in this segment of the video.",'
+        '"key_points":["Point 1","Point 2","Point 3"]}]}\n\n'
+        "Rules:\n"
+        "- Group segments into 3-8 logical topics in chronological order\n"
+        "- explanation: 4-6 sentences — thorough, educational, explain the concept clearly\n"
+        "- details: 2-3 sentences — go deeper with examples, edge cases, or related concepts from the transcript\n"
+        "- key_points: 4-6 concise bullet points summarising the most important takeaways\n"
+        "- start_time/end_time: accurate bounds in seconds from the transcript timestamps\n"
+        "- Use the actual transcript content to ground every explanation — do not hallucinate\n"
+        "- Focus entirely on concepts and knowledge; ignore camera angles, background, appearance of people"
+    )
+    user_msg = f"Video file: {document_name}\n\nTranscript segments:\n{evidence}"
+    cache_key = "summary:" + str(hash((document_name, user_id or "")))
+    cached = _cache_get(cache_key)
+    if cached:
+        return cached
+
+    import json as _json
+    last_err: Exception | None = None
+    for client, model in providers:
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
+                temperature=0.2,
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            if not raw:
+                continue
+            try:
+                parsed = _json.loads(_strip_markdown_json(raw))
+                if isinstance(parsed, dict) and isinstance(parsed.get("topics"), list) and parsed["topics"]:
+                    for t in parsed["topics"]:
+                        t["document_name"] = document_name
+                    _cache_put(cache_key, parsed)
+                    return parsed
+            except Exception:
+                pass
+        except Exception as e:
+            last_err = e
+            if _is_rate_limit_error(e):
+                time.sleep(1)
+                continue
+            break
+
+    # Phi-3 plain-text fallback — wrap in a single topic
+    phi_ans = _phi3_fallback_answer(
+        f"Summarize this video content topic by topic:\n\n{evidence[:3000]}"
+    )
+    if phi_ans:
+        fallback = {
+            "title": document_name,
+            "topics": [{
+                "title": "Summary",
+                "start_time": 0,
+                "end_time": 0,
+                "explanation": phi_ans.get("text", ""),
+                "key_points": [],
+                "document_name": document_name,
+            }],
+        }
+        _cache_put(cache_key, fallback)
+        return fallback
+
+    if last_err:
+        logger.warning("summarize_video LLM failed: %s", last_err)
+    return None
+
+
 # Base dir for videos and video_chunks (backend folder), so paths work regardless of process cwd
 _BACKEND_DIR = Path(__file__).resolve().parent
 

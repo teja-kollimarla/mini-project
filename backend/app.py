@@ -58,6 +58,7 @@ from main import (
     chunks_look_relevant,
     llm_answer_from_chunks,
     llm_general_answer,
+    summarize_video,
     recover_video_to_cloudinary,
     retrieve_data,
     upload_directory_to_cloudinary,
@@ -153,6 +154,17 @@ class ChunkResponse(BaseModel):
     filename: str | None = None
     b2_key: str | None = None
     url: str | None = None
+
+
+class SummarizeRequest(BaseModel):
+    document_name: str = Field(..., description="Video filename to summarize")
+
+class SummarizeResponse(BaseModel):
+    success: bool
+    title: str
+    document_name: str
+    topics: list[dict]
+    message: str | None = None
 
 
 # --- Database-backed: users, videos, chats ---
@@ -422,6 +434,33 @@ def retrieve(
             chunks=chunks,
             answer_text=answer.get("text") if isinstance(answer, dict) else None,
             answer_html=answer.get("html") if isinstance(answer, dict) else None,
+            message=None,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/summarize", response_model=SummarizeResponse)
+def summarize(
+    body: SummarizeRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Generate a structured, topic-based summary of a specific video."""
+    try:
+        result = summarize_video(body.document_name, user_id=user_id)
+        if not result:
+            return SummarizeResponse(
+                success=False,
+                title=body.document_name,
+                document_name=body.document_name,
+                topics=[],
+                message="Could not generate a summary. Make sure the video is indexed and an LLM provider is configured.",
+            )
+        return SummarizeResponse(
+            success=True,
+            title=result.get("title", body.document_name),
+            document_name=body.document_name,
+            topics=result.get("topics", []),
             message=None,
         )
     except Exception as e:

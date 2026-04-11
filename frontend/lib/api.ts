@@ -215,6 +215,32 @@ export async function retrieve(query: string) {
   }>(res)
 }
 
+// --- Summarize video ---
+export type TopicSummary = {
+  title: string
+  start_time: number
+  end_time: number
+  explanation: string
+  details?: string
+  key_points: string[]
+  document_name: string
+}
+
+export async function summarizeVideo(documentName: string) {
+  const res = await fetch(`${API_URL}/api/summarize`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ document_name: documentName }),
+  })
+  return handleResponse<{
+    success: boolean
+    title: string
+    document_name: string
+    topics: TopicSummary[]
+    message?: string | null
+  }>(res)
+}
+
 // --- Chunk (create clip) ---
 export async function createChunk(documentName: string, startTime: number, endTime: number) {
   const res = await fetch(`${API_URL}/api/chunk`, {

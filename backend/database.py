@@ -19,10 +19,23 @@ if DATABASE_URL.startswith("sqlite"):
 else:
     connect_args = {}
 
+_pool_kwargs: dict = {}
+if not DATABASE_URL.startswith("sqlite"):
+    # Cloud Postgres (Neon, Railway, Supabase) closes idle connections after ~5 min.
+    # pool_pre_ping tests the connection before use and reconnects if stale.
+    # pool_recycle discards connections older than 5 minutes proactively.
+    _pool_kwargs = {
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+        "pool_size": 5,
+        "max_overflow": 10,
+    }
+
 engine = create_engine(
     DATABASE_URL,
     connect_args=connect_args,
     echo=os.getenv("SQL_ECHO", "").lower() in ("1", "true"),
+    **_pool_kwargs,
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

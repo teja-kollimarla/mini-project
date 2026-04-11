@@ -1,0 +1,15 @@
+videos/
+video_chunks/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.avi
+*.flv
+*.m4a
